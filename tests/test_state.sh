@@ -12,7 +12,8 @@ cat > "$bk" <<'JSON'
   {"id":"it-1","status":"done","deps":[]},
   {"id":"it-2","status":"ready","deps":["it-1"]},
   {"id":"it-3","status":"ready","deps":["it-2"]},
-  {"id":"it-4","status":"ready","deps":[]}
+  {"id":"it-4","status":"ready","deps":[]},
+  {"id":"it-5","status":"ready"}
 ]}
 JSON
 
@@ -20,19 +21,23 @@ state_backlog_valid "$bk"; assert_ok $? "valid backlog passes"
 echo 'not json' > "$ws/bad.json"
 state_backlog_valid "$ws/bad.json"; assert_fail $? "bad backlog rejected"
 
-# ready = deps all done; it-2 (dep it-1 done) and it-4 (no deps); NOT it-3 (dep it-2 ready)
+# ready = deps all done; it-2 (dep it-1 done), it-4 (empty deps), it-5 (no deps key); NOT it-3 (dep it-2 ready)
 ready="$(state_ready_items "$bk" 10 | tr '\n' ' ')"
-assert_eq "$ready" "it-2 it-4 " "ready items respect deps"
+assert_eq "$ready" "it-2 it-4 it-5 " "ready items respect deps (incl. missing deps key)"
 
 # max_parallel limits count
 ready2="$(state_ready_items "$bk" 1 | tr '\n' ' ')"
 assert_eq "$ready2" "it-2 " "ready items honor max_parallel"
 
-# open count = ready+in_progress+blocked = it-2,it-3,it-4 = 3
-assert_eq "$(state_open_count "$bk")" "3" "open count"
+# open count = ready+in_progress+blocked = it-2,it-3,it-4,it-5 = 4
+assert_eq "$(state_open_count "$bk")" "4" "open count"
 
-state_set_status "$bk" it-2 done
+state_set_status "$bk" it-2 done "merged ok"
 assert_eq "$(jq -r '.items[]|select(.id=="it-2").status' "$bk")" "done" "set status"
+assert_eq "$(jq -r '.items[]|select(.id=="it-2").notes' "$bk")" "merged ok" "note written when non-empty"
+# empty note preserves existing notes
+state_set_status "$bk" it-2 done
+assert_eq "$(jq -r '.items[]|select(.id=="it-2").notes' "$bk")" "merged ok" "empty note preserves prior note"
 
 state_increment_attempts "$bk" it-3
 assert_eq "$(jq -r '.items[]|select(.id=="it-3").attempts' "$bk")" "1" "increment attempts"
