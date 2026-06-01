@@ -39,4 +39,9 @@ agent_run "$cfg2" build "do" "$ws" "$log4" 30
 assert_contains "$(cat "$log4")" "exec" "codex exec subcommand"
 assert_contains "$(cat "$log4")" "-m gpt-5" "codex model flag"
 
+# a non-zero agent exit propagates through agent_run (full stack)
+log5="$ws/e.log"
+( export FAKE_EXIT=1; agent_run "$cfg" build "fail" "$ws" "$log5" 30 )
+assert_fail $? "agent_run propagates non-zero exit"
+
 test_summary

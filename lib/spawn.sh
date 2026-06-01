@@ -4,15 +4,19 @@
 # Run a command with a wall-clock cap. Returns command's exit code, or 124 on timeout.
 run_with_timeout() { # timeout_sec logfile -- cmd args...
   local t="$1" log="$2"; shift 2
+  # `set -m` gives the backgrounded subshell its own process group (pgid == pid), so a
+  # timeout can kill the WHOLE child tree. Real claude/codex spawn descendants that a
+  # plain `kill $pid` would orphan (verified). Restore monitor mode immediately after.
+  set -m
   ( "$@" ) >"$log" 2>&1 &
   local pid=$!
+  set +m
   local waited=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$t" ]; then
-      kill "$pid" 2>/dev/null
-      sleep 1
-      kill -9 "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
+      # Kill the process group ("-$pid"). Wrap in { } 2>/dev/null to swallow the shell's
+      # async "Terminated" job-control notice (verified to suppress it cleanly).
+      { kill -TERM -"$pid" 2>/dev/null; sleep 1; kill -KILL -"$pid" 2>/dev/null; wait "$pid"; } 2>/dev/null
       return 124
     fi
     sleep 1
@@ -23,7 +27,7 @@ run_with_timeout() { # timeout_sec logfile -- cmd args...
 
 # Resolve a role and run the matching CLI (or fake) in cwd, capped by timeout.
 agent_run() { # config_json role prompt cwd logfile timeout_sec
-  local cfg="$1" role rrole tool model effort flags prompt="$3" cwd="$4" log="$5" t="$6"
+  local cfg="$1" rrole tool model effort flags prompt="$3" cwd="$4" log="$5" t="$6"
   rrole="$(config_resolve_role "$cfg" "$2")"
   tool="$(config_role_field "$cfg" "$rrole" tool)"
   model="$(config_role_field "$cfg" "$rrole" model)"
