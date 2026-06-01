@@ -74,3 +74,56 @@ progress_spawn() { # statedir id -- cmd...
   [ "${1:-}" = "--" ] && shift
   ( "$@"; printf '%s %s\n' "$?" "$(date +%s)" > "$d/$id.done" ) &
 }
+
+# Emit job-file paths: active jobs (no sentinel) first, then finished ones.
+progress_sort_jobs() { # progress_dir
+  local jf
+  for jf in "$1"/*.job; do [ -e "$jf" ] || continue; [ -f "${jf%.job}.done" ] || printf '%s\n' "$jf"; done
+  for jf in "$1"/*.job; do [ -e "$jf" ] || continue; [ -f "${jf%.job}.done" ] && printf '%s\n' "$jf"; done
+}
+
+# Draw one dashboard frame to stderr. TTY-only: a no-op otherwise.
+# Redraws in place by moving up the previous frame's line count and clearing down.
+progress_render() { # statedir iter budget_start budget_total
+  [ "${PROGRESS_TTY:-0}" = "1" ] || return 0
+  local d iter bstart btot now cols out nlines act fin jf
+  local id label tool model log start st glyph el endep tl row
+  d="$(progress_dir "$1")"; iter="$2"; bstart="$3"; btot="$4"
+  now="$(date +%s)"
+  cols="$(tput cols 2>/dev/null || echo 80)"; [ "$cols" -gt 100 ] && cols=100
+
+  act=0; fin=0
+  for jf in "$d"/*.job; do [ -e "$jf" ] || continue
+    if [ -f "${jf%.job}.done" ]; then fin=$((fin+1)); else act=$((act+1)); fi
+  done
+
+  out="iter $iter | elapsed $(progress_fmt_elapsed $((now-bstart)))/$(progress_fmt_elapsed "$btot") | $act running, $fin done"$'\n'
+  nlines=1
+  out="$out$(printf '%*s' "$cols" '' | tr ' ' '-')"$'\n'; nlines=$((nlines+1))
+
+  while IFS= read -r jf; do
+    [ -e "$jf" ] || continue
+    IFS=$'\t' read -r id label tool model log start st < "$jf"
+    if [ -f "${jf%.job}.done" ] && [ "$st" = "running" ]; then
+      endep="$(cut -d' ' -f2 "${jf%.job}.done" 2>/dev/null)"; : "${endep:=$now}"
+      el=$((endep-start)); st="finishing"; glyph='◍'
+    elif [ "$st" = "running" ]; then
+      el=$((now-start)); glyph='●'
+    else
+      el=$((now-start))
+      case "$st" in merged|done) glyph='✓';; failed) glyph='✗';; bounced) glyph='↺';; *) glyph='·';; esac
+    fi
+    row="$(printf '%s %-8s %-16.16s %s/%s  %-9s %s' "$glyph" "$id" "$label" "$tool" "$model" "$st" "$(progress_fmt_elapsed "$el")")"
+    out="$out$(printf '%s' "$row" | progress_truncate "$cols")"$'\n'; nlines=$((nlines+1))
+    if [ "$glyph" = '●' ] || [ "$glyph" = '◍' ]; then
+      tl="$(progress_tail_log "$log")"
+      out="$out$(printf '   └ %s' "$tl" | progress_truncate "$cols")"$'\n'; nlines=$((nlines+1))
+    fi
+  done <<EOF
+$(progress_sort_jobs "$d")
+EOF
+
+  [ "${PROGRESS_LAST_LINES:-0}" -gt 0 ] && printf '\033[%dA\033[J' "$PROGRESS_LAST_LINES" >&2
+  printf '%s' "$out" >&2
+  PROGRESS_LAST_LINES="$nlines"
+}

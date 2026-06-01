@@ -78,4 +78,32 @@ progress_spawn "$sdir" w1 -- /bin/bash -c 'exit 3'
 wait
 assert_eq "$(cut -d' ' -f1 "$sdir/progress/w1.done")" "3" "spawn sentinel records exit code"
 
+# --- render (forced TTY) draws a header + a running row with its log tail ---
+progress_reset "$sdir"
+PROGRESS_TTY=1; PROGRESS_LAST_LINES=0
+now="$(date +%s)"
+# a running job started 65s ago, logging to a.log ("editing foo.py" is its last line)
+printf 'it-2\tbuild api\tcodex\tgpt-5.5\t%s\t%s\trunning\n' "$ws/a.log" "$((now-65))" \
+  > "$sdir/progress/it-2.job"
+# a merged (terminal) job with a sentinel
+printf 'it-9\tscaffold\tcodex\tgpt-5.5\t%s\t%s\tmerged\n' "$ws/a.log" "$((now-120))" \
+  > "$sdir/progress/it-9.job"
+printf '0 %s\n' "$((now-100))" > "$sdir/progress/it-9.done"
+
+render_out="$(progress_render "$sdir" 3 "$((now-130))" 360 2>&1)"
+assert_contains "$render_out" "iter 3"         "render: header shows iteration"
+assert_contains "$render_out" "it-2"           "render: running row id"
+assert_contains "$render_out" "gpt-5.5"        "render: row shows tool/model"
+assert_contains "$render_out" "editing foo.py" "render: running row shows log tail"
+assert_contains "$render_out" "it-9"           "render: terminal row present"
+
+# running jobs sort before jobs that have a sentinel
+sort_out="$(progress_sort_jobs "$sdir/progress" | sed 's#.*/##' | tr '\n' ' ')"
+assert_eq "$sort_out" "it-2.job it-9.job " "sort_jobs: active before finished"
+
+# --- render is a no-op when not a TTY ---
+PROGRESS_TTY=0
+noop_out="$(progress_render "$sdir" 3 "$((now-130))" 360 2>&1)"
+assert_eq "$noop_out" "" "render: non-TTY prints nothing"
+
 test_summary
