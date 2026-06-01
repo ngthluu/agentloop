@@ -53,6 +53,21 @@ assert_eq "$(cut -f7 "$sdir/progress/it-1.job")" "merged" "set_status updates st
 progress_set_status "$sdir" nope merged >/dev/null 2>&1
 assert_ok $? "set_status unknown id is a no-op"
 
+# --- on a TTY, register/set_status stay silent (dashboard handles display) ---
+PROGRESS_TTY=1
+quiet_reg="$(progress_register "$sdir" it-q "q" claude opus "$ws/a.log" 2>&1)"
+assert_eq "$quiet_reg" "" "register is silent on TTY"
+quiet_st="$(progress_set_status "$sdir" it-q merged 2>&1)"
+assert_eq "$quiet_st" "" "set_status is silent on TTY"
+PROGRESS_TTY=0
+
+# --- a tab in the label is sanitized so the TSV stays well-formed ---
+PROGRESS_TTY=0
+printf 'reg with tab\n' >/dev/null
+progress_register "$sdir" it-tab "$(printf 'a\tb')" claude opus "$ws/a.log" >/dev/null 2>&1
+assert_eq "$(cut -f2 "$sdir/progress/it-tab.job")" "a b" "tab in label replaced with space"
+assert_eq "$(cut -f3 "$sdir/progress/it-tab.job")" "claude" "fields stay aligned after sanitize"
+
 # --- reset clears the progress dir ---
 progress_reset "$sdir"
 assert_eq "$(ls "$sdir/progress" 2>/dev/null | wc -l | tr -d ' ')" "0" "reset empties progress dir"

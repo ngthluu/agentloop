@@ -39,6 +39,7 @@ progress_dir() { printf '%s/progress' "$1"; }   # statedir
 
 # Wipe and recreate the job-state dir for a fresh iteration.
 progress_reset() { # statedir
+  [ -n "$1" ] || return 1
   local d; d="$(progress_dir "$1")"
   rm -rf "$d"; mkdir -p "$d"
   PROGRESS_LAST_LINES=0
@@ -46,9 +47,10 @@ progress_reset() { # statedir
 
 # Register a running job. Parent calls this right before backgrounding the work.
 progress_register() { # statedir id label tool model log
-  local d; d="$(progress_dir "$1")"; mkdir -p "$d"
+  local d safe; d="$(progress_dir "$1")"; mkdir -p "$d"
+  safe="$3"; safe="${safe//$'\t'/ }"; safe="${safe//$'\n'/ }"
   printf '%s\t%s\t%s\t%s\t%s\t%s\trunning\n' \
-    "$2" "$3" "$4" "$5" "$6" "$(date +%s)" > "$d/$2.job"
+    "$2" "$safe" "$4" "$5" "$6" "$(date +%s)" > "$d/$2.job"
   [ "${PROGRESS_TTY:-0}" = "1" ] || \
     printf '%s  dispatch %-10s %s/%s  %s\n' "$(date +%H:%M:%S)" "$2" "$4" "$5" "$3" >&2
 }
@@ -69,6 +71,6 @@ progress_set_status() { # statedir id status
 # child becomes a zombie whose pid still answers kill -0, which would hang a poll.
 progress_spawn() { # statedir id -- cmd...
   local d; d="$(progress_dir "$1")"; local id="$2"; shift 2
-  [ "$1" = "--" ] && shift
+  [ "${1:-}" = "--" ] && shift
   ( "$@"; printf '%s %s\n' "$?" "$(date +%s)" > "$d/$id.done" ) &
 }
