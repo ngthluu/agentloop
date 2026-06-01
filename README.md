@@ -41,6 +41,7 @@ lib/spawn.sh            timeout + claude/codex command building (+ fake-agent ho
 lib/worktree.sh         worktree create/merge/cleanup
 lib/planner.sh          planner prompt + invoke + validate
 lib/worker.sh           worker prompt + dispatch
+lib/progress.sh         live progress dashboard (TTY) + event lines (non-TTY)
 lib/loop.sh             iteration loop, parallel dispatch, integration, termination
 templates/              default config.yaml + master.md
 tests/                  offline suite (fake agent) + opt-in live smoke test
