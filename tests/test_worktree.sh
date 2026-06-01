@@ -23,7 +23,7 @@ wt_remove "$repo" "$wt" "item/it-1"; assert_ok $? "worktree removed"
 
 # conflicting change must fail and leave repo clean (merge aborted)
 wt2="$ws/wt-2"
-wt_create "$repo" "item/it-2" "$wt2"
+wt_create "$repo" "item/it-2" "$wt2"; assert_ok $? "conflict worktree created"
 echo "theirs" > "$wt2/file.txt"; git -C "$wt2" add -A && git -C "$wt2" commit -qm theirs
 echo "ours" > "$repo/file.txt"; git -C "$repo" add -A && git -C "$repo" commit -qm ours
 wt_merge "$repo" "item/it-2"; assert_fail $? "conflicting merge fails"
