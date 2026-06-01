@@ -30,15 +30,9 @@ agent_run() { # config_json role prompt cwd logfile timeout_sec
   effort="$(config_role_field "$cfg" "$rrole" effort)"
   flags="$(config_role_field "$cfg" "$rrole" flags)"
 
-  # Build argv as an indexed array (bash 3.2 supports these).
+  # Build the real argv as an indexed array (bash 3.2 supports these).
   local argv=()
-  if [ "${FAKE_AGENT:-0}" = "1" ]; then
-    if [ "$tool" = "codex" ]; then
-      argv=( "${FAKE_AGENT_BIN}" "$tool" exec "$prompt" )
-    else
-      argv=( "${FAKE_AGENT_BIN}" "$tool" )
-    fi
-  elif [ "$tool" = "claude" ]; then
+  if [ "$tool" = "claude" ]; then
     argv=( claude -p "$prompt" )
   elif [ "$tool" = "codex" ]; then
     argv=( codex exec "$prompt" )
@@ -49,6 +43,10 @@ agent_run() { # config_json role prompt cwd logfile timeout_sec
   [ -n "$model" ]  && { [ "$tool" = "codex" ] && argv+=( -m "$model" ) || argv+=( --model "$model" ); }
   [ -n "$effort" ] && { [ "$tool" = "codex" ] && argv+=( -c "model_reasoning_effort=$effort" ) || argv+=( --effort "$effort" ); }
   [ -n "$flags" ] && argv+=( $flags )
+
+  # In fake mode, intercept by prepending the stub; it receives the genuine real argv,
+  # so the real command construction above is what tests actually exercise.
+  [ "${FAKE_AGENT:-0}" = "1" ] && argv=( "$FAKE_AGENT_BIN" "${argv[@]}" )
 
   ( cd "$cwd" && run_with_timeout "$t" "$log" "${argv[@]}" )
 }
