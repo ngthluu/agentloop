@@ -53,4 +53,9 @@ assert_eq "$rc" "0" "loop_run reports DONE"
 assert_eq "$(cat "$ws/made.txt" 2>/dev/null)" "made" "worker output merged to main"
 assert_eq "$(state_open_count "$ws/.agentloop/state/backlog.json")" "0" "no open items at end"
 
+# progress event lines were emitted to stderr for the dispatched worker
+plog="$ws/progress.out"
+( loop_run "$cfg" "$ws" ) >/dev/null 2>"$plog" || true
+assert_contains "$(cat "$plog")" "dispatch" "loop emits progress dispatch event lines (non-TTY)"
+
 test_summary
