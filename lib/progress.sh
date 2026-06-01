@@ -90,7 +90,9 @@ progress_render() { # statedir iter budget_start budget_total
   local id label tool model log start st glyph el endep tl row
   d="$(progress_dir "$1")"; iter="$2"; bstart="$3"; btot="$4"
   now="$(date +%s)"
-  cols="$(tput cols 2>/dev/null || echo 80)"; [ "$cols" -gt 100 ] && cols=100
+  cols="$(tput cols 2>/dev/null)"; cols="${cols:-80}"
+  case "$cols" in *[!0-9]*|"") cols=80;; esac
+  [ "$cols" -gt 100 ] && cols=100
 
   act=0; fin=0
   for jf in "$d"/*.job; do [ -e "$jf" ] || continue
@@ -110,7 +112,12 @@ progress_render() { # statedir iter budget_start budget_total
     elif [ "$st" = "running" ]; then
       el=$((now-start)); glyph='●'
     else
-      el=$((now-start))
+      if [ -f "${jf%.job}.done" ]; then
+        endep="$(cut -d' ' -f2 "${jf%.job}.done" 2>/dev/null)"; : "${endep:=$now}"
+        el=$((endep-start))
+      else
+        el=$((now-start))
+      fi
       case "$st" in merged|done) glyph='✓';; failed) glyph='✗';; bounced) glyph='↺';; *) glyph='·';; esac
     fi
     row="$(printf '%s %-8s %-16.16s %s/%s  %-9s %s' "$glyph" "$id" "$label" "$tool" "$model" "$st" "$(progress_fmt_elapsed "$el")")"

@@ -106,4 +106,21 @@ PROGRESS_TTY=0
 noop_out="$(progress_render "$sdir" 3 "$((now-130))" 360 2>&1)"
 assert_eq "$noop_out" "" "render: non-TTY prints nothing"
 
+# --- render: finishing state + PROGRESS_LAST_LINES equals printed line count ---
+progress_reset "$sdir"
+PROGRESS_TTY=1; PROGRESS_LAST_LINES=0
+now="$(date +%s)"
+# a running job (no sentinel): row + tail = 2 lines
+printf 'r1\twork\tcodex\tgpt-5.5\t%s\t%s\trunning\n' "$ws/a.log" "$((now-30))" > "$sdir/progress/r1.job"
+# a finishing job: sentinel present but status still "running": row + tail = 2 lines
+printf 'f1\twork\tcodex\tgpt-5.5\t%s\t%s\trunning\n' "$ws/a.log" "$((now-40))" > "$sdir/progress/f1.job"
+printf '0 %s\n' "$((now-10))" > "$sdir/progress/f1.done"
+fin_out="$(progress_render "$sdir" 4 "$((now-130))" 360 2>&1)"
+assert_contains "$fin_out" "finishing" "render: finishing state shown for sentinel+running job"
+# Run again in the CURRENT shell (no command-substitution subshell) so the global update is visible.
+PROGRESS_LAST_LINES=0
+progress_render "$sdir" 4 "$((now-130))" 360 2>/dev/null
+# header(1) + separator(1) + r1 row(1) + r1 tail(1) + f1 row(1) + f1 tail(1) = 6
+assert_eq "$PROGRESS_LAST_LINES" "6" "render: PROGRESS_LAST_LINES equals printed line count"
+
 test_summary
