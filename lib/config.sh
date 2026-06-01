@@ -9,12 +9,9 @@ config_role_field() { # config_json role field
 }
 
 # Echo the role to actually use: the role if present in routing, else defaults.role.
+# Single jq pass; `// empty` yields nothing (not the string "null") if defaults.role is absent.
 config_resolve_role() { # config_json role
-  local present
-  present="$(printf '%s' "$1" | jq -r --arg r "$2" '.routing | has($r)')"
-  if [ "$present" = "true" ]; then printf '%s' "$2"
-  else printf '%s' "$1" | jq -r '.defaults.role'
-  fi
+  printf '%s' "$1" | jq -r --arg r "$2" 'if .routing | has($r) then $r else .defaults.role // empty end'
 }
 
 config_cap() { # config_json cap_key
