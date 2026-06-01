@@ -1,10 +1,11 @@
 # The orchestration loop. Pure control flow over the other libs.
+. "$AGENTLOOP_HOME/lib/config.sh"
 . "$AGENTLOOP_HOME/lib/state.sh"
 . "$AGENTLOOP_HOME/lib/planner.sh"
 . "$AGENTLOOP_HOME/lib/worker.sh"
 . "$AGENTLOOP_HOME/lib/worktree.sh"
 
-# Run the gate; write output to last_gate.txt; return its exit code (0 if no verify.sh yet).
+# Run the gate; write output to last_gate.txt; return its exit code (1 if no verify.sh yet).
 loop_gate() { # workspace
   local ws="$1" gate="$1/.agentloop/verify.sh" out="$1/.agentloop/state/last_gate.txt"
   if [ -x "$gate" ]; then
@@ -45,7 +46,10 @@ loop_iterate() { # config_json workspace iter_n -> sets LOOP_DONE_ITEMS (count m
   for id in $ids; do
     local rfile="$ws/.agentloop/results/$id.json"
     if [ -f "$rfile" ] && jq -e '.status=="done"' "$rfile" >/dev/null 2>&1; then
-      if wt_merge "$ws" "item/$id"; then
+      if [ -z "$(git -C "$ws" log --oneline "HEAD..item/$id" 2>/dev/null)" ]; then
+        # Worker claimed done but committed nothing — merging would be a silent no-op.
+        state_set_status "$sdir/backlog.json" "$id" ready "worker reported done but made no commits"
+      elif wt_merge "$ws" "item/$id"; then
         state_set_status "$sdir/backlog.json" "$id" done
         LOOP_DONE_ITEMS=$((LOOP_DONE_ITEMS+1))
       else
@@ -85,7 +89,7 @@ loop_run() { # config_json workspace
 
     if [ "${LOOP_DONE_ITEMS:-0}" -eq 0 ] && [ "$gate_state" = "$prev_gate" ]; then
       stalls=$((stalls+1))
-      if [ "$stalls" -ge 2 ]; then echo "STOP: no progress for 2 iterations" >&2; return 1; fi
+      if [ "$stalls" -ge 2 ]; then echo "STOP: no progress for 2 stalls (3 consecutive iterations)" >&2; return 1; fi
     else
       stalls=0
     fi
