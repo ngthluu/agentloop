@@ -123,4 +123,13 @@ progress_render "$sdir" 4 "$((now-130))" 360 2>/dev/null
 # header(1) + separator(1) + r1 row(1) + r1 tail(1) + f1 row(1) + f1 tail(1) = 6
 assert_eq "$PROGRESS_LAST_LINES" "6" "render: PROGRESS_LAST_LINES equals printed line count"
 
+# --- progress_wait returns once every tracked job has a sentinel (non-TTY) ---
+progress_reset "$sdir"
+PROGRESS_TTY=0
+progress_register "$sdir" jw lbl codex gpt-5 "$ws/a.log" >/dev/null 2>&1
+progress_spawn "$sdir" jw -- /bin/bash -c 'exit 0'
+progress_wait "$sdir" 1 "$(date +%s)" 360 -- jw
+assert_ok $? "progress_wait returns after the sentinel appears"
+assert_eq "$(cut -d' ' -f1 "$sdir/progress/jw.done")" "0" "wait: job ran to completion"
+
 test_summary

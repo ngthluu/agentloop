@@ -134,3 +134,19 @@ EOF
   printf '%s' "$out" >&2
   PROGRESS_LAST_LINES="$nlines"
 }
+
+# Block until every tracked id has a completion sentinel. On a TTY, redraw the
+# dashboard each tick; otherwise just poll quietly (event lines already emitted).
+progress_wait() { # statedir iter budget_start budget_total -- id...
+  local sdir="$1" iter="$2" bstart="$3" btot="$4"; shift 4
+  [ "${1:-}" = "--" ] && shift
+  local ids="$*" d id pending; d="$(progress_dir "$sdir")"
+  while :; do
+    pending=0
+    for id in $ids; do [ -f "$d/$id.done" ] || pending=1; done
+    [ "${PROGRESS_TTY:-0}" = "1" ] && progress_render "$sdir" "$iter" "$bstart" "$btot"
+    [ "$pending" = "0" ] && break
+    sleep "$PROGRESS_REFRESH"
+  done
+  wait 2>/dev/null   # reap the now-finished children
+}
