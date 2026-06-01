@@ -1,0 +1,16 @@
+# agentloop run config. Edit freely; re-running picks up changes.
+caps:
+  max_iterations: 25
+  max_parallel: 3
+  item_timeout_sec: 1200      # 20 min per worker
+  total_budget_sec: 21600     # 6 h whole run
+  max_attempts: 3
+
+routing:                      # role -> how to spawn
+  planner:   { tool: claude, model: opus,   effort: high,   flags: "--dangerously-skip-permissions" }
+  architect: { tool: claude, model: opus,   effort: high,   flags: "--dangerously-skip-permissions" }
+  build:     { tool: codex,  model: gpt-5,  effort: high,   flags: "--dangerously-bypass-approvals-and-sandbox" }
+  fix:       { tool: claude, model: sonnet, effort: medium, flags: "--dangerously-skip-permissions" }
+  trivial:   { tool: claude, model: haiku,  effort: low,    flags: "--dangerously-skip-permissions" }
+
+defaults: { role: build }
