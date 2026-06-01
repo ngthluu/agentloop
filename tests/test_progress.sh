@@ -29,4 +29,38 @@ assert_eq "$(progress_tail_log "$ws/empty.log")" "starting…" "empty log -> pla
 printf 'line1\n\nediting foo.py\n' > "$ws/a.log"
 assert_eq "$(progress_tail_log "$ws/a.log")" "editing foo.py" "tail last non-empty line"
 
+# --- init defaults to non-TTY under the test harness ---
+progress_init
+assert_eq "$PROGRESS_TTY" "0" "init detects non-TTY"
+
+# --- register writes a job file and emits a dispatch event line (non-TTY) ---
+sdir="$ws/state"; mkdir -p "$sdir"
+PROGRESS_TTY=0
+reg_out="$(progress_register "$sdir" it-1 "do thing" codex gpt-5.5 "$ws/a.log" 2>&1)"
+assert_contains "$reg_out" "dispatch" "register emits dispatch line"
+assert_contains "$reg_out" "it-1"     "register names the id"
+assert_eq "$(cut -f1 "$sdir/progress/it-1.job")" "it-1"    "job file: id field"
+assert_eq "$(cut -f3 "$sdir/progress/it-1.job")" "codex"   "job file: tool field"
+assert_eq "$(cut -f7 "$sdir/progress/it-1.job")" "running" "job file: status field"
+
+# --- set_status rewrites status (preserving other fields) and emits a line ---
+st_out="$(progress_set_status "$sdir" it-1 merged 2>&1)"
+assert_contains "$st_out" "merged" "set_status emits status line"
+assert_eq "$(cut -f1 "$sdir/progress/it-1.job")" "it-1"   "set_status preserves id"
+assert_eq "$(cut -f7 "$sdir/progress/it-1.job")" "merged" "set_status updates status"
+
+# --- set_status on an unknown id is a silent no-op ---
+progress_set_status "$sdir" nope merged >/dev/null 2>&1
+assert_ok $? "set_status unknown id is a no-op"
+
+# --- reset clears the progress dir ---
+progress_reset "$sdir"
+assert_eq "$(ls "$sdir/progress" 2>/dev/null | wc -l | tr -d ' ')" "0" "reset empties progress dir"
+
+# --- spawn backgrounds a command and writes a sentinel with exit code + end time ---
+progress_register "$sdir" w1 lbl codex gpt-5 "$ws/a.log" >/dev/null 2>&1
+progress_spawn "$sdir" w1 -- /bin/bash -c 'exit 3'
+wait
+assert_eq "$(cut -d' ' -f1 "$sdir/progress/w1.done")" "3" "spawn sentinel records exit code"
+
 test_summary
