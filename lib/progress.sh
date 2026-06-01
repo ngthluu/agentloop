@@ -15,6 +15,7 @@ progress_strip_ansi() {
 # Read one line from stdin; if longer than width, cut and append an ellipsis.
 progress_truncate() { # width
   local w="$1" line; IFS= read -r line || true
+  [ "$w" -le 0 ] && return 0
   if [ "${#line}" -gt "$w" ]; then printf '%s' "${line:0:$((w-1))}…"; else printf '%s' "$line"; fi
 }
 

@@ -15,10 +15,13 @@ assert_eq "$(progress_fmt_elapsed 600)" "10m00s" "fmt 600s"
 
 # --- progress_strip_ansi ---
 assert_eq "$(printf '\033[31mred\033[0m' | progress_strip_ansi)" "red" "strip ansi colors"
+assert_eq "$(printf '\033[1;32mbold-green\033[0m' | progress_strip_ansi)" "bold-green" "strip multi-param ansi"
 
 # --- progress_truncate ---
 assert_eq "$(printf 'hello'      | progress_truncate 10)" "hello"  "no truncation when short"
 assert_eq "$(printf 'helloworld' | progress_truncate 5)"  "hell…"  "truncate adds ellipsis"
+assert_eq "$(printf 'abcde' | progress_truncate 5)" "abcde" "no truncation at exact width"
+assert_eq "$(printf 'ab'    | progress_truncate 0)" ""      "width 0 yields empty"
 
 # --- progress_tail_log ---
 : > "$ws/empty.log"
