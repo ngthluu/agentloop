@@ -69,6 +69,8 @@ progress_set_status() { # statedir id status
 # Background a command; write a "<exit_code> <end_epoch>" sentinel when it exits.
 # Sentinels (not kill -0) are how progress_wait detects completion: an un-reaped
 # child becomes a zombie whose pid still answers kill -0, which would hang a poll.
+# A SIGKILL landing between the command finishing and the sentinel write is the only
+# way no sentinel appears; the orchestrator sends SIGTERM first, so the window is tiny.
 progress_spawn() { # statedir id -- cmd...
   local d; d="$(progress_dir "$1")"; local id="$2"; shift 2
   [ "${1:-}" = "--" ] && shift
@@ -137,6 +139,9 @@ EOF
 
 # Block until every tracked id has a completion sentinel. On a TTY, redraw the
 # dashboard each tick; otherwise just poll quietly (event lines already emitted).
+# Contract: every background job in the caller's shell must have been started via
+# progress_spawn for one of these ids (the trailing `wait` reaps all children).
+# Always returns 0-ish; callers should not rely on its exit status.
 progress_wait() { # statedir iter budget_start budget_total -- id...
   local sdir="$1" iter="$2" bstart="$3" btot="$4"; shift 4
   [ "${1:-}" = "--" ] && shift
@@ -146,7 +151,7 @@ progress_wait() { # statedir iter budget_start budget_total -- id...
     for id in $ids; do [ -f "$d/$id.done" ] || pending=1; done
     [ "${PROGRESS_TTY:-0}" = "1" ] && progress_render "$sdir" "$iter" "$bstart" "$btot"
     [ "$pending" = "0" ] && break
-    sleep "$PROGRESS_REFRESH"
+    sleep "${PROGRESS_REFRESH:-1}"
   done
   wait 2>/dev/null   # reap the now-finished children
 }
