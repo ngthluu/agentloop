@@ -132,4 +132,15 @@ progress_wait "$sdir" 1 "$(date +%s)" 360 -- jw
 assert_ok $? "progress_wait returns after the sentinel appears"
 assert_eq "$(cut -d' ' -f1 "$sdir/progress/jw.done")" "0" "wait: job ran to completion"
 
+# --- an id containing '/' is sanitized so files are written and wait never hangs ---
+progress_reset "$sdir"
+PROGRESS_TTY=0
+progress_register "$sdir" "auth/login" lbl codex gpt-5 "$ws/a.log" >/dev/null 2>&1
+assert_eq "$(ls "$sdir/progress"/*.job 2>/dev/null | wc -l | tr -d ' ')" "1" "slash id: one job file written"
+progress_spawn "$sdir" "auth/login" -- /bin/bash -c 'exit 0'
+progress_wait "$sdir" 1 "$(date +%s)" 360 -- "auth/login"
+assert_ok $? "slash id: wait completes without hanging"
+progress_set_status "$sdir" "auth/login" merged
+assert_eq "$(cut -f7 "$sdir/progress"/auth_login.job)" "merged" "slash id: set_status finds the job by key"
+
 test_summary

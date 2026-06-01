@@ -37,6 +37,12 @@ progress_init() {
 # Path to the per-iteration job-state directory.
 progress_dir() { printf '%s/progress' "$1"; }   # statedir
 
+# Map an id to a filesystem-safe key for job/sentinel filenames (ids come from
+# AI-generated backlog.json and may contain '/', tabs, or newlines).
+progress_key() { # id
+  local k="$1"; k="${k//\//_}"; k="${k//$'\t'/_}"; k="${k//$'\n'/_}"; printf '%s' "$k"
+}
+
 # Wipe and recreate the job-state dir for a fresh iteration.
 progress_reset() { # statedir
   [ -n "$1" ] || return 1
@@ -47,23 +53,24 @@ progress_reset() { # statedir
 
 # Register a running job. Parent calls this right before backgrounding the work.
 progress_register() { # statedir id label tool model log
-  local d safe; d="$(progress_dir "$1")"; mkdir -p "$d"
+  local d safe key; d="$(progress_dir "$1")"; mkdir -p "$d"
+  key="$(progress_key "$2")"
   safe="$3"; safe="${safe//$'\t'/ }"; safe="${safe//$'\n'/ }"
   printf '%s\t%s\t%s\t%s\t%s\t%s\trunning\n' \
-    "$2" "$safe" "$4" "$5" "$6" "$(date +%s)" > "$d/$2.job"
+    "$key" "$safe" "$4" "$5" "$6" "$(date +%s)" > "$d/$key.job"
   [ "${PROGRESS_TTY:-0}" = "1" ] || \
-    printf '%s  dispatch %-10s %s/%s  %s\n' "$(date +%H:%M:%S)" "$2" "$4" "$5" "$3" >&2
+    printf '%s  dispatch %-10s %s/%s  %s\n' "$(date +%H:%M:%S)" "$key" "$4" "$5" "$3" >&2
 }
 
 # Update a job's status field (id stays the same). No-op if the job is unknown.
 progress_set_status() { # statedir id status
-  local d f id label tool model log start st
-  d="$(progress_dir "$1")"; f="$d/$2.job"
+  local d f key id label tool model log start st
+  d="$(progress_dir "$1")"; key="$(progress_key "$2")"; f="$d/$key.job"
   [ -f "$f" ] || return 0
   IFS=$'\t' read -r id label tool model log start st < "$f"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$label" "$tool" "$model" "$log" "$start" "$3" > "$f"
   [ "${PROGRESS_TTY:-0}" = "1" ] || \
-    printf '%s  %-9s %-10s %s/%s\n' "$(date +%H:%M:%S)" "$3" "$2" "$tool" "$model" >&2
+    printf '%s  %-9s %-10s %s/%s\n' "$(date +%H:%M:%S)" "$3" "$key" "$tool" "$model" >&2
 }
 
 # Background a command; write a "<exit_code> <end_epoch>" sentinel when it exits.
@@ -72,9 +79,9 @@ progress_set_status() { # statedir id status
 # A SIGKILL landing between the command finishing and the sentinel write is the only
 # way no sentinel appears; the orchestrator sends SIGTERM first, so the window is tiny.
 progress_spawn() { # statedir id -- cmd...
-  local d; d="$(progress_dir "$1")"; local id="$2"; shift 2
+  local d key; d="$(progress_dir "$1")"; key="$(progress_key "$2")"; shift 2
   [ "${1:-}" = "--" ] && shift
-  ( "$@"; printf '%s %s\n' "$?" "$(date +%s)" > "$d/$id.done" ) &
+  ( "$@"; printf '%s %s\n' "$?" "$(date +%s)" > "$d/$key.done" ) &
 }
 
 # Emit job-file paths: active jobs (no sentinel) first, then finished ones.
@@ -148,7 +155,7 @@ progress_wait() { # statedir iter budget_start budget_total -- id...
   local ids="$*" d id pending; d="$(progress_dir "$sdir")"
   while :; do
     pending=0
-    for id in $ids; do [ -f "$d/$id.done" ] || pending=1; done
+    for id in $ids; do [ -f "$d/$(progress_key "$id").done" ] || pending=1; done
     [ "${PROGRESS_TTY:-0}" = "1" ] && progress_render "$sdir" "$iter" "$bstart" "$btot"
     [ "$pending" = "0" ] && break
     sleep "${PROGRESS_REFRESH:-1}"
