@@ -16,20 +16,26 @@ Usage: agentloop.sh "<goal prompt>" [options]
 EOF
 }
 
+need_val() { [ $# -ge 2 ] || { echo "ERROR: $1 requires a value" >&2; exit 2; }; }
+
 GOAL=""; WORKSPACE="$PWD"; CONFIG=""; FRESH=0; OVR_MAXIT=""; DRYRUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --workspace) WORKSPACE="$2"; shift 2;;
-    --config) CONFIG="$2"; shift 2;;
+    --workspace) need_val "$@"; WORKSPACE="$2"; shift 2;;
+    --config) need_val "$@"; CONFIG="$2"; shift 2;;
     --fresh) FRESH=1; shift;;
-    --max-iterations) OVR_MAXIT="$2"; shift 2;;
+    --max-iterations) need_val "$@"; OVR_MAXIT="$2"; shift 2;;
     --dry-run) DRYRUN=1; shift;;
     -h|--help) usage; exit 0;;
     -*) echo "unknown option $1" >&2; usage; exit 2;;
-    *) GOAL="$1"; shift;;
+    *) [ -z "$GOAL" ] || { echo "ERROR: multiple goal arguments (quote the goal)" >&2; usage; exit 2; }; GOAL="$1"; shift;;
   esac
 done
 [ -n "$GOAL" ] || { echo "ERROR: goal prompt required" >&2; usage; exit 2; }
+case "$OVR_MAXIT" in
+  "") ;;
+  *[!0-9]*) echo "ERROR: --max-iterations must be a positive integer" >&2; exit 2;;
+esac
 
 mkdir -p "$WORKSPACE"
 WORKSPACE="$(cd "$WORKSPACE" && pwd)"
@@ -41,7 +47,7 @@ mkdir -p "$META/state" "$META/results" "$META/logs" "$META/worktrees"
 [ -d "$WORKSPACE/.git" ] || git -C "$WORKSPACE" init -q
 git -C "$WORKSPACE" config user.email >/dev/null 2>&1 || git -C "$WORKSPACE" config user.email agentloop@local
 git -C "$WORKSPACE" config user.name  >/dev/null 2>&1 || git -C "$WORKSPACE" config user.name  agentloop
-grep -q '^.agentloop/$' "$WORKSPACE/.gitignore" 2>/dev/null || echo '.agentloop/' >> "$WORKSPACE/.gitignore"
+grep -Fxq '.agentloop/' "$WORKSPACE/.gitignore" 2>/dev/null || echo '.agentloop/' >> "$WORKSPACE/.gitignore"
 # ensure at least one commit exists so `worktree add HEAD` works
 git -C "$WORKSPACE" rev-parse HEAD >/dev/null 2>&1 || { git -C "$WORKSPACE" add -A; git -C "$WORKSPACE" commit -qm "agentloop: initial commit"; }
 
@@ -54,8 +60,14 @@ git -C "$WORKSPACE" rev-parse HEAD >/dev/null 2>&1 || { git -C "$WORKSPACE" add 
 CFG_JSON="$(config_to_json "$CONFIG")"
 [ -n "$OVR_MAXIT" ] && CFG_JSON="$(printf '%s' "$CFG_JSON" | jq --argjson v "$OVR_MAXIT" '.caps.max_iterations=$v')"
 
-# Graceful shutdown: kill children, flush.
-trap 'echo "interrupted; stopping" >&2; pkill -P $$ 2>/dev/null; exit 130' INT TERM
+# Graceful shutdown: recursively kill the whole descendant tree so spawned claude/codex
+# agents (grandchildren) don't survive the interrupt and keep burning API credits.
+kill_tree() { # pid
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done
+  kill -TERM "$1" 2>/dev/null
+}
+trap 'echo "interrupted; stopping" >&2; for c in $(pgrep -P $$ 2>/dev/null); do kill_tree "$c"; done; exit 130' INT TERM
 
 if [ "$DRYRUN" = "1" ]; then
   planner_run "$CFG_JSON" "$WORKSPACE" "$META/logs/dryrun-planner.log" "$(config_cap "$CFG_JSON" item_timeout_sec)"
