@@ -2,6 +2,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+export AGENTLOOP_HOME="$ROOT"
 . "$HERE/lib.sh"
 . "$ROOT/lib/config.sh"
 
