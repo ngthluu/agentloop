@@ -22,6 +22,7 @@ loop_iterate() { # config_json workspace iter_n -> sets LOOP_DONE_ITEMS (count m
   mkdir -p "$ldir" "$ws/.agentloop/results"
   local itimeout; itimeout="$(config_cap "$cfg" item_timeout_sec)"; : "${itimeout:=1200}"
   local maxpar; maxpar="$(config_cap "$cfg" max_parallel)"; : "${maxpar:=3}"
+  local maxatt; maxatt="$(config_cap "$cfg" max_attempts)"; : "${maxatt:=3}"
 
   planner_run "$cfg" "$ws" "$ldir/planner.log" "$itimeout" || { echo "planner failed/invalid" >&2; return 2; }
 
@@ -30,20 +31,29 @@ loop_iterate() { # config_json workspace iter_n -> sets LOOP_DONE_ITEMS (count m
   [ -z "$ids" ] && return 0
 
   # Dispatch each ready item in its own worktree, in parallel.
-  local id item wt
+  # `dispatched` collects only the ids that actually got a worker, so the integration
+  # pass below never re-touches items we capped or failed to set up here.
+  local id item wt att dispatched=""
   for id in $ids; do
     item="$(jq -c --arg id "$id" '.items[]|select(.id==$id)' "$sdir/backlog.json")"
+    # Enforce the per-item attempt cap: drop runaway items instead of retrying forever.
+    att="$(printf '%s' "$item" | jq -r '.attempts // 0')"
+    if [ "$att" -ge "$maxatt" ]; then
+      state_set_status "$sdir/backlog.json" "$id" failed "exceeded max_attempts ($maxatt)"
+      continue
+    fi
     wt="$ws/.agentloop/worktrees/$id"
     rm -rf "$wt"; wt_remove "$ws" "$wt" "item/$id" >/dev/null 2>&1
     wt_create "$ws" "item/$id" "$wt" || { state_set_status "$sdir/backlog.json" "$id" failed "worktree create failed"; continue; }
     state_set_status "$sdir/backlog.json" "$id" in_progress
     state_increment_attempts "$sdir/backlog.json" "$id"
     ( worker_dispatch "$cfg" "$ws" "$item" "$wt" "$ldir/item-$id.log" "$itimeout" ) &
+    dispatched="$dispatched $id"
   done
   wait
 
-  # Integrate sequentially based on each worker's result file.
-  for id in $ids; do
+  # Integrate sequentially based on each worker's result file (dispatched items only).
+  for id in $dispatched; do
     local rfile="$ws/.agentloop/results/$id.json"
     if [ -f "$rfile" ] && jq -e '.status=="done"' "$rfile" >/dev/null 2>&1; then
       if [ -z "$(git -C "$ws" log --oneline "HEAD..item/$id" 2>/dev/null)" ]; then
