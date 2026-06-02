@@ -24,8 +24,57 @@ defaults: { role: build }
 fn claude_argv() {
     let a = spawn::build_argv(&cfg(), "planner", "HELLO").unwrap();
     assert_eq!(a, vec![
-        "claude","-p","HELLO","--model","opus","--effort","high","--flag-a","--flag-b"
+        "claude","-p","HELLO",
+        "--output-format","stream-json","--verbose",
+        "--model","opus","--effort","high","--flag-a","--flag-b",
     ]);
+}
+
+// --- claude stream-json -> readable log formatting ---
+
+#[test]
+fn fmt_assistant_text() {
+    let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Replan complete."}]}}"#;
+    assert_eq!(spawn::format_claude_event(line), vec!["Replan complete."]);
+}
+
+#[test]
+fn fmt_tool_use_bash_shows_command() {
+    let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo build"}}]}}"#;
+    let out = spawn::format_claude_event(line);
+    assert_eq!(out.len(), 1);
+    assert!(out[0].contains("Bash"), "{out:?}");
+    assert!(out[0].contains("cargo build"), "{out:?}");
+}
+
+#[test]
+fn fmt_tool_use_edit_shows_path() {
+    let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"src/spawn.rs"}}]}}"#;
+    let out = spawn::format_claude_event(line);
+    assert_eq!(out.len(), 1);
+    assert!(out[0].contains("Edit") && out[0].contains("src/spawn.rs"), "{out:?}");
+}
+
+#[test]
+fn fmt_result_returns_final_text() {
+    let line = r#"{"type":"result","subtype":"success","result":"All done.","is_error":false}"#;
+    assert_eq!(spawn::format_claude_event(line), vec!["All done."]);
+}
+
+#[test]
+fn fmt_tool_results_are_skipped() {
+    let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"huge output"}]}}"#;
+    assert!(spawn::format_claude_event(line).is_empty(), "tool_result should be skipped");
+}
+
+#[test]
+fn fmt_invalid_json_passes_through() {
+    assert_eq!(spawn::format_claude_event("not json at all"), vec!["not json at all"]);
+}
+
+#[test]
+fn fmt_blank_line_yields_nothing() {
+    assert!(spawn::format_claude_event("   ").is_empty());
 }
 
 #[test]

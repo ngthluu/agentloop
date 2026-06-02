@@ -21,7 +21,13 @@ pub fn backlog_valid(path: &Path) -> bool {
     matches!(read(path), Ok(v) if v.get("items").map(|i| i.is_array()).unwrap_or(false))
 }
 
-pub fn ready_items(path: &Path, max_parallel: usize) -> Result<Vec<String>> {
+/// Ids that should be dispatched this round: items whose deps are all `done` and
+/// that are either `ready` or a planner dependency-`blocked` item with NO pending
+/// user question. Including the latter is what makes the loop fully autonomous —
+/// the planner uses `blocked` for sequencing, so such items run as soon as their
+/// deps complete instead of stalling the loop. A `blocked` item that carries a real
+/// user question (`.agentloop/questions/<id>.json`) is left for the user to answer.
+pub fn ready_items(path: &Path, ws: &Path, max_parallel: usize) -> Result<Vec<String>> {
     let v = read(path)?;
     let empty = vec![];
     let items = v["items"].as_array().unwrap_or(&empty);
@@ -31,13 +37,19 @@ pub fn ready_items(path: &Path, max_parallel: usize) -> Result<Vec<String>> {
         .collect();
     let mut out = Vec::new();
     for it in items {
-        if it["status"] != "ready" { continue; }
+        let id = match it["id"].as_str() { Some(i) => i, None => continue };
+        let dispatchable = match it["status"].as_str() {
+            Some("ready") => true,
+            Some("blocked") => !crate::inbox::has_question(ws, id),
+            _ => false,
+        };
+        if !dispatchable { continue; }
         let deps_ok = match it.get("deps").and_then(|d| d.as_array()) {
             Some(deps) => deps.iter().all(|d| d.as_str().map(|s| done.contains(s)).unwrap_or(false)),
             None => true, // missing deps key == no deps
         };
         if deps_ok {
-            if let Some(id) = it["id"].as_str() { out.push(id.to_string()); }
+            out.push(id.to_string());
         }
     }
     out.truncate(max_parallel);
@@ -89,4 +101,16 @@ pub fn blocked_count(path: &Path) -> Result<i64> {
     let empty = vec![];
     Ok(v["items"].as_array().unwrap_or(&empty).iter()
         .filter(|i| i["status"] == "blocked").count() as i64)
+}
+
+/// Items genuinely waiting on the user: `blocked` AND carrying a pending question
+/// file. Planner dependency-`blocked` items (no question) are excluded — they are
+/// dispatched by [`ready_items`], so they must not be mistaken for a user halt.
+pub fn user_blocked_count(path: &Path, ws: &Path) -> Result<i64> {
+    let v = read(path)?;
+    let empty = vec![];
+    Ok(v["items"].as_array().unwrap_or(&empty).iter()
+        .filter(|i| i["status"] == "blocked")
+        .filter(|i| i["id"].as_str().map(|id| crate::inbox::has_question(ws, id)).unwrap_or(false))
+        .count() as i64)
 }

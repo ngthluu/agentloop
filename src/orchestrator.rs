@@ -59,7 +59,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     }
     reporter.status("planner", "done", &ptool, &pmodel);
 
-    let ready = state::ready_items(&bk, maxpar)?;
+    let ready = state::ready_items(&bk, ws, maxpar)?;
     if ready.is_empty() {
         return Ok(0);
     }
@@ -231,10 +231,10 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
             return Ok(0);
         }
 
-        let blocked = state::blocked_count(&bk)?;
-        // Headless run can't answer questions. If the only open work is blocked on
-        // the user, stop gracefully rather than spin or false-stall.
-        if open > 0 && open == blocked {
+        // Only a genuine user-question block (not a planner dependency-block, which
+        // ready_items now dispatches autonomously) should halt a headless run.
+        let user_blocked = state::user_blocked_count(&bk, ws)?;
+        if open > 0 && open == user_blocked {
             eprintln!("STOP: blocked on user input (headless)");
             return Ok(1);
         }
@@ -294,13 +294,14 @@ pub async fn run_interactive(
             let grc = gate(ws);
             let gate_state = if grc == 0 { "pass" } else { "fail" };
             let open = state::open_count(&bk)?;
-            let blocked = state::blocked_count(&bk)?;
+            let user_blocked = state::user_blocked_count(&bk, ws)?;
             reporter.iteration(n, merged, gate_state, open);
 
             if gate_state == "pass" && open == 0 { break 'working true; }
 
-            // Only blocked work remains: block for a command (answer/add-task/quit).
-            if open > 0 && open == blocked {
+            // Only user-question blocks remain (dependency-blocks are dispatched by
+            // ready_items): block for a command (answer/add-task/quit).
+            if open > 0 && open == user_blocked {
                 match crx.recv().await {
                     None | Some(Command::Quit) => return Ok(0),
                     Some(Command::AnswerQuestion { item_id, text }) => { let _ = apply_answer(ws, &item_id, &text); }
