@@ -10,6 +10,7 @@ pub fn planner_prompt(ws: &Path, max_attempts: u32) -> String {
     let goal = std::fs::read_to_string(st.join("goal.md")).unwrap_or_default();
     let master = std::fs::read_to_string(st.join("master.md")).unwrap_or_default();
     let backlog = std::fs::read_to_string(st.join("backlog.json")).unwrap_or_default();
+    let requests = crate::requests::prompt_block(ws).unwrap_or_default();
     format!(r#"You are the PLANNER for an autonomous app build. Working dir: {ws} (a git repo).
 
 GOAL:
@@ -35,8 +36,8 @@ Your job each round:
 OUTPUT CONTRACT — you MUST overwrite .agentloop/state/backlog.json with valid JSON:
 {{"items":[{{"id","title","desc","role","deps":[],"status":"ready|in_progress|done|failed|blocked","attempts":0,"acceptance"}}]}}
 Also rewrite .agentloop/state/master.md as a human-readable status board.
-Do not print the JSON to stdout; write the files."#,
-        ws = ws.display(), goal = goal, master = master, backlog = backlog, max_attempts = max_attempts)
+Do not print the JSON to stdout; write the files.{requests}"#,
+        ws = ws.display(), goal = goal, master = master, backlog = backlog, max_attempts = max_attempts, requests = requests)
 }
 
 /// Invoke the planner agent, then validate backlog.json (re-prompt once on invalid).
@@ -45,10 +46,17 @@ pub async fn planner_run(cfg: &Config, ws: &Path, log: &Path, t: Duration) -> Re
     let max_attempts = cfg.max_attempts();
     let prompt = planner_prompt(ws, max_attempts);
     spawn::agent_run(cfg, "planner", &prompt, ws, log, t).await?;
-    if state::backlog_valid(&bk) { return Ok(true); }
+    if state::backlog_valid(&bk) {
+        let _ = crate::requests::mark_all_consumed(ws);
+        return Ok(true);
+    }
 
     eprintln!("planner produced invalid backlog.json; re-prompting once");
     let retry = format!("{prompt}\nNOTE: your previous backlog.json was invalid JSON. Write valid JSON this time.");
     spawn::agent_run(cfg, "planner", &retry, ws, log, t).await?;
-    Ok(state::backlog_valid(&bk))
+    let ok = state::backlog_valid(&bk);
+    if ok {
+        let _ = crate::requests::mark_all_consumed(ws);
+    }
+    Ok(ok)
 }

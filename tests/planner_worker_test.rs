@@ -50,3 +50,19 @@ fn worker_prompt_documents_needs_input_and_prior_qa() {
     assert!(p.contains("SQLite"), "prior answer injected");
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn planner_prompt_includes_pending_requests() {
+    let ws = std::env::temp_dir().join(format!("alpr-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
+    std::fs::write(ws.join(".agentloop/state/goal.md"), "g").unwrap();
+    std::fs::write(ws.join(".agentloop/state/master.md"), "m").unwrap();
+    std::fs::write(ws.join(".agentloop/state/backlog.json"), r#"{"items":[]}"#).unwrap();
+    agentloop::requests::append(&ws, "add a --due flag").unwrap();
+
+    let p = agentloop::planner::planner_prompt(&ws, 3);
+    assert!(p.contains("PENDING USER REQUESTS"));
+    assert!(p.contains("add a --due flag"));
+    let _ = std::fs::remove_dir_all(&ws);
+}
