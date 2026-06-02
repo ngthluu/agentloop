@@ -12,5 +12,6 @@ routing:                      # role -> how to spawn
   build:     { tool: codex,  model: gpt-5.5, effort: high,   flags: "--dangerously-bypass-approvals-and-sandbox" }
   fix:       { tool: claude, model: sonnet, effort: medium, flags: "--dangerously-skip-permissions" }
   trivial:   { tool: claude, model: haiku,  effort: low,    flags: "--dangerously-skip-permissions" }
+  resolver:  { tool: claude, model: sonnet, effort: medium, flags: "--dangerously-skip-permissions" }
 
 defaults: { role: build }

@@ -7,7 +7,59 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::events::{Command, Reporter};
-use crate::{planner, state, worker, worktree};
+use crate::worktree::MergeOutcome;
+use crate::{planner, spawn, state, worker, worktree};
+
+/// An effectively-infinite timeout. The resolver is unbounded (no wall-clock cap) per
+/// design, but is still registered in ACTIVE_PGIDS by the spawn layer, so quitting the
+/// TUI / SIGINT / SIGTERM still kills it (no orphaned agent).
+const NO_TIMEOUT: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
+
+/// Spawn an unbounded resolver agent in the main workspace to resolve an in-progress
+/// merge conflict for `id`, then complete the merge. Returns true if the merge is
+/// resolved and committed.
+async fn resolve_conflict(
+    cfg: &Config,
+    ws: &Path,
+    id: &str,
+    label: &str,
+    item: &Value,
+    branch: &str,
+    n: u32,
+    reporter: &Arc<dyn Reporter>,
+) -> Result<bool> {
+    let rrole = cfg.resolve_role("resolver").unwrap_or_default();
+    let tool = cfg.role_field(&rrole, "tool").unwrap_or_default();
+    let model = cfg.role_field(&rrole, "model").unwrap_or_default();
+    let rid = format!("resolve-{id}");
+    let log = ws.join(format!(".agentloop/logs/iter-{n}/{rid}.log"));
+    reporter.dispatch(&rid, &format!("resolve merge conflict — {label}"), &tool, &model, Some(&log));
+
+    let prompt = worker::resolver_prompt(ws, item);
+    // Unbounded: run in the main workspace with no effective timeout.
+    if let Err(e) = spawn::agent_run(cfg, "resolver", &prompt, ws, &log, NO_TIMEOUT).await {
+        eprintln!("resolver spawn error for {id}: {e:#}");
+    }
+
+    // Resolved iff no unmerged paths remain. If the agent resolved+staged but didn't
+    // commit, finish the merge ourselves.
+    if worktree::has_unmerged(ws) {
+        reporter.status(&rid, "failed", &tool, &model);
+        return Ok(false);
+    }
+    if worktree::merge_in_progress(ws) && !worktree::commit_merge(ws) {
+        reporter.status(&rid, "failed", &tool, &model);
+        return Ok(false);
+    }
+    // Guard against a resolver that aborted instead of completing the merge: the
+    // branch's commits must now be contained in HEAD.
+    if worktree::has_commits_ahead(ws, branch) {
+        reporter.status(&rid, "failed", &tool, &model);
+        return Ok(false);
+    }
+    reporter.status(&rid, "merged", &tool, &model);
+    Ok(true)
+}
 
 /// Run verify.sh; capture output to last_gate.txt; return its exit code (1 if absent).
 pub fn gate(ws: &Path) -> i32 {
@@ -163,13 +215,41 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             if !worktree::has_commits_ahead(ws, &branch) {
                 state::set_status(&bk, id, "ready", "worker reported done but made no commits")?;
                 reporter.status(id, "bounced", "", "");
-            } else if worktree::merge(ws, &branch)? {
-                state::set_status(&bk, id, "done", "")?;
-                reporter.status(id, "merged", "", "");
-                merged += 1;
             } else {
-                state::set_status(&bk, id, "ready", "merge conflict; replan")?;
-                reporter.status(id, "bounced", "", "");
+                match worktree::merge_or_conflict(ws, &branch)? {
+                    MergeOutcome::Merged => {
+                        state::set_status(&bk, id, "done", "")?;
+                        reporter.status(id, "merged", "", "");
+                        merged += 1;
+                    }
+                    MergeOutcome::Conflict => {
+                        let (label, item_v) = state::read(&bk)
+                            .ok()
+                            .map(|v| {
+                                let it = state::item(&v, id).cloned();
+                                let label = it
+                                    .as_ref()
+                                    .and_then(|i| i["title"].as_str().map(String::from))
+                                    .unwrap_or_default();
+                                (label, it.unwrap_or(Value::Null))
+                            })
+                            .unwrap_or_default();
+                        if resolve_conflict(cfg, ws, id, &label, &item_v, &branch, n, reporter).await? {
+                            state::set_status(&bk, id, "done", "")?;
+                            reporter.status(id, "merged", "", "");
+                            merged += 1;
+                        } else {
+                            // The resolver itself is unbounded (it never consumes an
+                            // attempt). But a failed resolve bounces the item back to
+                            // `ready`, so the next WORKER re-dispatch consumes an attempt
+                            // — that bound is deliberate, so a perpetually-conflicting
+                            // item can't loop forever.
+                            worktree::abort_merge(ws);
+                            state::set_status(&bk, id, "ready", "merge conflict; resolver failed")?;
+                            reporter.status(id, "bounced", "", "");
+                        }
+                    }
+                }
             }
         } else {
             state::set_status(&bk, id, "ready", "worker did not report done")?;

@@ -14,8 +14,8 @@ const TEMPLATE_MASTER: &str = include_str!("../templates/master.md");
 #[derive(Parser, Debug)]
 #[command(name = "agentloop", about = "Autonomous app builder")]
 struct Args {
-    /// The goal prompt (quote it)
-    goal: String,
+    /// The goal prompt (quote it). Optional: omit to resume an existing workspace.
+    goal: Option<String>,
     /// Target dir (default: current dir)
     #[arg(long)]
     workspace: Option<PathBuf>,
@@ -114,18 +114,40 @@ pub fn fold_rerun_goal(ws: &Path, goal: &str) -> Result<()> {
     Ok(())
 }
 
+/// The goal text to use: the CLI argument if non-blank, else the persisted
+/// `.agentloop/state/goal.md`, else empty (a fresh workspace that will start in standby).
+pub fn resolve_goal_text(arg: Option<&str>, ws: &Path) -> String {
+    if let Some(g) = arg {
+        if !g.trim().is_empty() {
+            return g.trim().to_string();
+        }
+    }
+    std::fs::read_to_string(ws.join(".agentloop/state/goal.md"))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 pub async fn run() -> Result<()> {
+    let started = std::time::Instant::now();
     let args = Args::parse();
     let ws = args.workspace.clone().unwrap_or(std::env::current_dir()?);
     if args.fresh {
         let _ = std::fs::remove_dir_all(ws.join(".agentloop"));
     }
 
-    let cfg_path = bootstrap_workspace(&ws, &args.goal, args.config.as_deref())?;
+    let goal_arg = args.goal.clone();
+    let cfg_path = bootstrap_workspace(&ws, goal_arg.as_deref().unwrap_or(""), args.config.as_deref())?;
     let ws = ws.canonicalize().unwrap_or(ws);
     if !args.fresh {
-        fold_rerun_goal(&ws, &args.goal)?;
+        if let Some(g) = goal_arg.as_deref() {
+            if !g.trim().is_empty() {
+                fold_rerun_goal(&ws, g)?;
+            }
+        }
     }
+    let goal_text = resolve_goal_text(goal_arg.as_deref(), &ws);
+
     let mut cfg = Config::load(&cfg_path)?;
     if let Some(m) = args.max_iterations {
         cfg.caps.max_iterations = Some(m);
@@ -158,12 +180,13 @@ pub async fn run() -> Result<()> {
     }
 
     if is_tty {
-        let rc = crate::app::run_tui(cfg, ws.clone(), args.goal.clone()).await?;
+        let rc = crate::app::run_tui(cfg, ws.clone(), goal_text).await?;
         std::process::exit(rc);
     } else {
         let rc = orchestrator::run(&cfg, &ws, Arc::new(EventLineReporter)).await?;
         eprintln!(
-            "=== agentloop finished (rc={rc}). See {}/.agentloop/state/master.md ===",
+            "=== agentloop finished (rc={rc}) in {}. See {}/.agentloop/state/master.md ===",
+            crate::tui::fmt_elapsed(started.elapsed()),
             ws.display()
         );
         std::process::exit(rc);
