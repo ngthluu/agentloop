@@ -10,6 +10,18 @@ questions that agents raise, and a persistent input bar for adding tasks. When t
 goal is done it stays alive in standby so you can keep adding tasks. Piped/non-TTY
 runs fall back to plain event-line output and exit on completion.
 
+## Install
+
+Prebuilt binaries (macOS arm64/x86_64, Linux x86_64):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ngthluu/agentloop/main/scripts/install.sh | bash
+```
+
+This installs the `agentloop` binary to `~/.local/bin` (override with
+`AGENTLOOP_INSTALL_DIR=/usr/local/bin`). Ensure the install dir is on your `PATH`.
+The `claude` and/or `codex` CLIs must also be on `PATH` at runtime.
+
 ## Requirements
 
 Rust (edition 2021), git, and the `claude` and/or `codex` CLIs on PATH.
@@ -130,6 +142,24 @@ templates/
   master.md        embedded default master status board
 tests/             offline integration suite (fake_agent, scripted stub, no tokens)
 ```
+
+## Releasing (CD)
+
+Releases are cut by pushing to the `production` branch:
+
+1. Bump `version` in `Cargo.toml` (e.g. `0.1.0` -> `0.1.1`) and merge to `main`.
+2. Fast-forward/merge `main` into `production` and push:
+
+   ```bash
+   git push origin main:production
+   ```
+
+3. The `release` workflow reads `version` from `Cargo.toml`, creates and pushes
+   the tag `v{version}`, builds `agentloop` for each supported target, and
+   publishes a GitHub Release with the `agentloop-<target>.tar.gz` assets.
+
+If the tag `v{version}` already exists, the workflow no-ops — bump the version to
+cut a new release. `install.sh` always fetches the **latest** release.
 
 ## Tests
 
