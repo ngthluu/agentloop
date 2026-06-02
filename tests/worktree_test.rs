@@ -1,4 +1,5 @@
 use agentloop::worktree;
+use agentloop::worktree::MergeOutcome;
 use std::path::Path;
 use std::process::Command;
 
@@ -38,6 +39,70 @@ fn create_merge_remove_roundtrip() {
 
     worktree::remove(&repo, &wt, "item/it-1");
     assert!(!wt.exists());
+}
+
+/// Create a branch that conflicts with main on `shared.txt`.
+fn make_conflict(repo: &std::path::Path) {
+    // main writes shared.txt = "main"
+    std::fs::write(repo.join("shared.txt"), "main\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "main side"]);
+    // branch off the PRIOR commit and write a different shared.txt
+    git(repo, &["branch", "item/c", "HEAD~1"]);
+    let wt = repo.join(".agentloop/worktrees/c");
+    std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+    git(repo, &["worktree", "add", "-q", wt.to_str().unwrap(), "item/c"]);
+    std::fs::write(wt.join("shared.txt"), "branch\n").unwrap();
+    git(&wt, &["add", "-A"]);
+    git(&wt, &["commit", "-qm", "branch side"]);
+    git(repo, &["worktree", "remove", "--force", wt.to_str().unwrap()]);
+}
+
+#[test]
+fn merge_or_conflict_reports_conflict_without_aborting() {
+    let repo = init_repo();
+    make_conflict(&repo);
+
+    let outcome = worktree::merge_or_conflict(&repo, "item/c").unwrap();
+    assert!(matches!(outcome, MergeOutcome::Conflict));
+    // The merge must be left in progress (NOT aborted) for the resolver to fix.
+    assert!(worktree::merge_in_progress(&repo), "merge still in progress");
+    assert!(worktree::has_unmerged(&repo), "unmerged paths present");
+
+    // Cleanup so the test leaves a clean repo.
+    worktree::abort_merge(&repo);
+    assert!(!worktree::merge_in_progress(&repo));
+}
+
+#[test]
+fn merge_or_conflict_clean_merge_reports_merged() {
+    let repo = init_repo();
+    let wt = repo.join(".agentloop/worktrees/ok");
+    std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+    worktree::create(&repo, "item/ok", &wt).unwrap();
+    std::fs::write(wt.join("new.txt"), "x").unwrap();
+    git(&wt, &["add", "-A"]);
+    git(&wt, &["commit", "-qm", "ok"]);
+
+    let outcome = worktree::merge_or_conflict(&repo, "item/ok").unwrap();
+    assert!(matches!(outcome, MergeOutcome::Merged));
+    assert!(!worktree::merge_in_progress(&repo));
+    assert!(repo.join("new.txt").exists());
+}
+
+#[test]
+fn commit_merge_completes_a_resolved_merge() {
+    let repo = init_repo();
+    make_conflict(&repo);
+    assert!(matches!(worktree::merge_or_conflict(&repo, "item/c").unwrap(), MergeOutcome::Conflict));
+
+    // Simulate a resolver: pick a resolution and stage it.
+    std::fs::write(repo.join("shared.txt"), "resolved\n").unwrap();
+    git(&repo, &["add", "shared.txt"]);
+    assert!(!worktree::has_unmerged(&repo), "no unmerged paths after staging");
+
+    assert!(worktree::commit_merge(&repo), "commit completes the merge");
+    assert!(!worktree::merge_in_progress(&repo), "merge no longer in progress");
 }
 
 #[test]
