@@ -184,6 +184,19 @@ impl AppState {
     }
 }
 
+/// Human working-time: "{s}s" under a minute, "{m}m{s:02}s" under an hour,
+/// else "{h}h{m:02}m".
+pub fn fmt_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 fn status_glyph(status: &str) -> &'static str {
     match status {
         "running" => "●",
