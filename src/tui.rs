@@ -28,6 +28,18 @@ enum Mode {
     AddingTask,
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum Focus {
+    Jobs,
+    Inbox,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum View {
+    List,
+    JobDetail,
+}
+
 pub struct AppState {
     pub goal: String,
     pub jobs: Vec<Job>,
@@ -39,6 +51,10 @@ pub struct AppState {
     pub standby: bool,
     mode: Mode,
     input: String,
+    focus: Focus,
+    view: View,
+    selected_job: usize,
+    log_scroll: u16,
 }
 
 impl AppState {
@@ -54,6 +70,10 @@ impl AppState {
             standby: false,
             mode: Mode::Normal,
             input: String::new(),
+            focus: Focus::Inbox,
+            view: View::List,
+            selected_job: 0,
+            log_scroll: 0,
         }
     }
 
@@ -111,34 +131,89 @@ impl AppState {
     /// Map a key to an optional Command. Returns None when the key only changes UI state.
     pub fn on_key(&mut self, k: KeyEvent) -> Option<Command> {
         match self.mode {
-            Mode::Normal => match k.code {
-                KeyCode::Char('q') => Some(Command::Quit),
-                KeyCode::Char('a') => {
-                    self.mode = Mode::AddingTask;
-                    self.input.clear();
-                    None
-                }
-                KeyCode::Up => {
-                    if self.selected > 0 {
-                        self.selected -= 1;
+            Mode::Normal => {
+                // Detail view has its own keys.
+                if self.view == View::JobDetail {
+                    match k.code {
+                        KeyCode::Esc => {
+                            self.view = View::List;
+                            self.log_scroll = 0;
+                        }
+                        KeyCode::Up => {
+                            self.log_scroll = self.log_scroll.saturating_add(1);
+                        }
+                        KeyCode::Down => {
+                            self.log_scroll = self.log_scroll.saturating_sub(1);
+                        }
+                        KeyCode::Char('q') => return Some(Command::Quit),
+                        _ => {}
                     }
-                    None
+                    return None;
                 }
-                KeyCode::Down => {
-                    if self.selected + 1 < self.inbox.len() {
-                        self.selected += 1;
-                    }
-                    None
-                }
-                KeyCode::Enter => {
-                    if !self.inbox.is_empty() {
-                        self.mode = Mode::Answering;
+                match k.code {
+                    KeyCode::Char('q') => Some(Command::Quit),
+                    KeyCode::Char('a') => {
+                        self.mode = Mode::AddingTask;
                         self.input.clear();
+                        None
                     }
-                    None
+                    KeyCode::Tab => {
+                        self.focus = match self.focus {
+                            Focus::Jobs => Focus::Inbox,
+                            Focus::Inbox => Focus::Jobs,
+                        };
+                        None
+                    }
+                    KeyCode::Up => {
+                        match self.focus {
+                            Focus::Jobs => {
+                                if self.selected_job > 0 {
+                                    self.selected_job -= 1;
+                                }
+                            }
+                            Focus::Inbox => {
+                                if self.selected > 0 {
+                                    self.selected -= 1;
+                                }
+                            }
+                        }
+                        None
+                    }
+                    KeyCode::Down => {
+                        match self.focus {
+                            Focus::Jobs => {
+                                if self.selected_job + 1 < self.jobs.len() {
+                                    self.selected_job += 1;
+                                }
+                            }
+                            Focus::Inbox => {
+                                if self.selected + 1 < self.inbox.len() {
+                                    self.selected += 1;
+                                }
+                            }
+                        }
+                        None
+                    }
+                    KeyCode::Enter => {
+                        match self.focus {
+                            Focus::Jobs => {
+                                if !self.jobs.is_empty() {
+                                    self.view = View::JobDetail;
+                                    self.log_scroll = 0;
+                                }
+                            }
+                            Focus::Inbox => {
+                                if !self.inbox.is_empty() {
+                                    self.mode = Mode::Answering;
+                                    self.input.clear();
+                                }
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
             Mode::Answering => match k.code {
                 KeyCode::Esc => {
                     self.mode = Mode::Normal;
@@ -201,6 +276,14 @@ impl AppState {
 
     pub fn mode_is_answering(&self) -> bool {
         self.mode == Mode::Answering
+    }
+
+    pub fn focus_is_jobs(&self) -> bool {
+        self.focus == Focus::Jobs
+    }
+
+    pub fn in_job_detail(&self) -> bool {
+        self.view == View::JobDetail
     }
 }
 

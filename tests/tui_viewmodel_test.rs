@@ -70,3 +70,39 @@ fn dispatch_starts_timer_and_stores_log_path_then_freezes() {
     let j = s.jobs.iter().find(|j| j.id == "it-1").unwrap();
     assert!(j.frozen.is_some(), "timer freezes on a terminal status");
 }
+
+#[test]
+fn tab_toggles_focus_and_enter_opens_job_detail() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
+    let mut s = AppState::new("g".into());
+    s.apply(Event::JobDispatched {
+        id: "it-1".into(), label: "scaffold".into(), tool: "codex".into(),
+        model: "gpt-5".into(), log_path: Some(PathBuf::from("/tmp/x.log")),
+    });
+
+    // Default focus is Inbox; Tab moves it to Jobs.
+    assert!(!s.focus_is_jobs());
+    assert!(s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).is_none());
+    assert!(s.focus_is_jobs());
+
+    // Enter on the Jobs pane opens the detail view; no command emitted.
+    assert!(s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_none());
+    assert!(s.in_job_detail());
+
+    // Esc returns to the list.
+    assert!(s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_none());
+    assert!(!s.in_job_detail());
+}
+
+#[test]
+fn enter_on_inbox_focus_still_answers() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut s = AppState::new("g".into());
+    s.apply(Event::QuestionRaised { item_id: "db".into(), label: "db".into(), text: "q?".into(), context: "".into() });
+    // Focus defaults to Inbox: Enter opens the answer editor (no command yet).
+    assert!(s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_none());
+    for c in "yes".chars() { s.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)); }
+    let cmd = s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(cmd, Some(Command::AnswerQuestion { ref item_id, .. }) if item_id == "db"));
+}
