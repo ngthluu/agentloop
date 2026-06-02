@@ -34,3 +34,19 @@ fn worker_prompt_has_contract() {
     assert!(p.contains("A"));
     assert!(p.contains(".agentloop/results/it-9.json"));
 }
+
+#[test]
+fn worker_prompt_documents_needs_input_and_prior_qa() {
+    let ws = std::env::temp_dir().join(format!("alwq-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(ws.join(".agentloop/answers")).unwrap();
+    // pre-existing answer should be injected into the prompt
+    agentloop::inbox::record_answer(&ws, "it-9", "DB?", "SQLite").unwrap();
+
+    let item = serde_json::json!({"id":"it-9","title":"T","desc":"D","role":"build","acceptance":"A"});
+    let p = agentloop::worker::worker_prompt(&ws, &item);
+    assert!(p.contains("needs_input"), "documents the needs_input escape hatch");
+    assert!(p.contains("questions/it-9.json"));
+    assert!(p.contains("SQLite"), "prior answer injected");
+    let _ = std::fs::remove_dir_all(&ws);
+}
