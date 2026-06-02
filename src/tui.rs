@@ -134,6 +134,7 @@ impl AppState {
             Mode::Normal => {
                 // Detail view has its own keys.
                 if self.view == View::JobDetail {
+                    // Tab / 'a' / Enter are intentionally inert in detail view.
                     match k.code {
                         KeyCode::Esc => {
                             self.view = View::List;
@@ -197,7 +198,7 @@ impl AppState {
                     KeyCode::Enter => {
                         match self.focus {
                             Focus::Jobs => {
-                                if !self.jobs.is_empty() {
+                                if self.selected_job < self.jobs.len() {
                                     self.view = View::JobDetail;
                                     self.log_scroll = 0;
                                 }
