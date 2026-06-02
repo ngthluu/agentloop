@@ -110,6 +110,15 @@ pub async fn run() -> Result<()> {
         cfg.caps.max_iterations = Some(m);
     }
 
+    use std::io::IsTerminal;
+    let is_tty = std::io::stdout().is_terminal();
+    // Headless and dry-run runs: a SIGINT (Ctrl-C) or SIGTERM kills in-flight agents and
+    // exits, so an interrupt never orphans claude/codex. The TUI path installs its own
+    // handler (it must also restore the terminal), so skip it there.
+    if args.dry_run || !is_tty {
+        install_kill_on_signal();
+    }
+
     if args.dry_run {
         let log = ws.join(".agentloop/logs/dryrun-planner.log");
         let ok = crate::planner::planner_run(
@@ -127,8 +136,7 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    use std::io::IsTerminal;
-    if std::io::stdout().is_terminal() {
+    if is_tty {
         let rc = crate::app::run_tui(cfg, ws.clone(), args.goal.clone()).await?;
         std::process::exit(rc);
     } else {
@@ -139,4 +147,32 @@ pub async fn run() -> Result<()> {
         );
         std::process::exit(rc);
     }
+}
+
+/// Spawn a task that, on Ctrl-C or SIGTERM, kills every in-flight agent process group
+/// and exits. For headless and dry-run runs (no terminal state to restore).
+fn install_kill_on_signal() {
+    tokio::spawn(async move {
+        let sigterm = async {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                match signal(SignalKind::terminate()) {
+                    Ok(mut s) => {
+                        s.recv().await;
+                    }
+                    Err(_) => std::future::pending::<()>().await,
+                }
+            }
+            #[cfg(not(unix))]
+            std::future::pending::<()>().await;
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm => {}
+        }
+        eprintln!("\ninterrupted; stopping agents...");
+        crate::spawn::kill_all_agents();
+        std::process::exit(130);
+    });
 }

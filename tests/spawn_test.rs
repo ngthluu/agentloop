@@ -84,3 +84,45 @@ async fn timeout_returns_124() {
     std::env::remove_var("FAKE_AGENT_BIN");
     std::env::remove_var("FAKE_SLEEP");
 }
+
+#[tokio::test]
+async fn kill_all_agents_terminates_in_flight() {
+    let bin = env!("CARGO_BIN_EXE_fake_agent");
+    let _guard = ENV_LOCK.lock().await;
+    std::env::set_var("FAKE_AGENT", "1");
+    std::env::set_var("FAKE_AGENT_BIN", bin);
+    std::env::set_var("FAKE_SLEEP", "30"); // would run ~30s if not killed
+
+    let dir = std::env::temp_dir().join(format!("alkill-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("agent.log");
+
+    assert_eq!(spawn::active_agent_count(), 0, "registry starts empty");
+
+    let dir2 = dir.clone();
+    let handle = tokio::spawn(async move {
+        spawn::agent_run(&cfg(), "planner", "P", &dir2, &log, Duration::from_secs(60)).await
+    });
+
+    // Wait for the agent to register its process group.
+    for _ in 0..100 {
+        if spawn::active_agent_count() >= 1 { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(spawn::active_agent_count(), 1, "in-flight agent registered");
+
+    // Kill it; the background agent_run must return promptly (not after the 30s sleep).
+    spawn::kill_all_agents();
+    let joined = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("agent_run did not return after kill_all_agents");
+    let rc = joined.expect("join error").expect("agent_run errored");
+    assert_ne!(rc, 124, "agent was killed, not timed out");
+    assert_eq!(spawn::active_agent_count(), 0, "registry empty after exit");
+
+    std::env::remove_var("FAKE_AGENT");
+    std::env::remove_var("FAKE_AGENT_BIN");
+    std::env::remove_var("FAKE_SLEEP");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,8 +1,45 @@
 use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::config::Config;
+
+/// Process-group ids of every agent currently running. The signal handler and the
+/// TUI-exit path use this to kill in-flight claude/codex so an interrupt never leaves
+/// agents orphaned (burning credits). Each agent is its own process group.
+static ACTIVE_PGIDS: LazyLock<Mutex<HashSet<i32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn register_pgid(pgid: i32) {
+    ACTIVE_PGIDS.lock().unwrap().insert(pgid);
+}
+
+fn unregister_pgid(pgid: i32) {
+    ACTIVE_PGIDS.lock().unwrap().remove(&pgid);
+}
+
+/// Number of agent process groups currently registered (for tests/diagnostics).
+pub fn active_agent_count() -> usize {
+    ACTIVE_PGIDS.lock().unwrap().len()
+}
+
+/// Kill every in-flight agent process group (SIGTERM, brief grace, SIGKILL). Safe to
+/// call from a signal handler or on TUI exit; idempotent and never panics.
+pub fn kill_all_agents() {
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+    let pgids: Vec<i32> = ACTIVE_PGIDS.lock().unwrap().iter().copied().collect();
+    for pg in &pgids {
+        let _ = killpg(Pid::from_raw(*pg), Signal::SIGTERM);
+    }
+    if !pgids.is_empty() {
+        std::thread::sleep(Duration::from_millis(300));
+        for pg in &pgids {
+            let _ = killpg(Pid::from_raw(*pg), Signal::SIGKILL);
+        }
+    }
+}
 
 /// Build the real claude/codex argv for a role (prompt included), mirroring lib/spawn.sh.
 pub fn build_argv(cfg: &Config, role: &str, prompt: &str) -> Result<Vec<String>> {
@@ -67,10 +104,18 @@ pub async fn run_with_timeout(
     let mut child = cmd.group_spawn().context("spawn agent process group")?;
     // id() returns the group leader's PID, which equals the PGID because
     // group_spawn() puts the child in a fresh process group with itself as leader.
-    let pgid = child.id().map(|p| Pid::from_raw(p as i32));
+    let raw_pgid = child.id().map(|p| p as i32);
+    if let Some(p) = raw_pgid {
+        register_pgid(p);
+    }
+    let pgid = raw_pgid.map(Pid::from_raw);
 
-    match tokio::time::timeout(t, child.wait()).await {
-        Ok(status) => Ok(status?.code().unwrap_or(-1)),
+    // Compute the outcome without an early `?`-return so the pgid is always
+    // unregistered (a leaked registry entry would make kill_all_agents target a
+    // pid that may have been reused).
+    let outcome = match tokio::time::timeout(t, child.wait()).await {
+        Ok(Ok(status)) => status.code().unwrap_or(-1),
+        Ok(Err(_io_err)) => -1,
         Err(_elapsed) => {
             if let Some(pg) = pgid {
                 let _ = killpg(pg, Signal::SIGTERM);
@@ -78,9 +123,13 @@ pub async fn run_with_timeout(
                 let _ = killpg(pg, Signal::SIGKILL);
             }
             let _ = child.wait().await;
-            Ok(124)
+            124
         }
+    };
+    if let Some(p) = raw_pgid {
+        unregister_pgid(p);
     }
+    Ok(outcome)
 }
 
 /// Resolve a role and run the matching CLI (or fake) in cwd, capped by timeout.

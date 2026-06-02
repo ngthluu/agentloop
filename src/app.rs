@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{self, Event as CtEvent};
+use crossterm::event::{self, Event as CtEvent, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -35,7 +35,28 @@ fn restore_terminal(term: &mut Term) -> Result<()> {
     Ok(())
 }
 
+/// On SIGTERM while the TUI is up, raw mode is on and the alt screen is active. Restore
+/// the terminal best-effort, kill in-flight agents, and exit so nothing is orphaned.
+#[cfg(unix)]
+fn install_tui_sigterm_handler() {
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        term.recv().await;
+        let _ = disable_raw_mode();
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        crate::spawn::kill_all_agents();
+        std::process::exit(143);
+    });
+}
+
 pub async fn run_tui(cfg: Config, ws: PathBuf, goal: String) -> Result<i32> {
+    #[cfg(unix)]
+    install_tui_sigterm_handler();
+
     let (etx, mut erx) = mpsc::unbounded_channel::<Event>();
     let (ctx, mut crx) = mpsc::unbounded_channel::<Command>();
 
@@ -73,6 +94,13 @@ pub async fn run_tui(cfg: Config, ws: PathBuf, goal: String) -> Result<i32> {
         // Poll for a key with a short timeout (keeps the tick ~80 ms).
         if event::poll(Duration::from_millis(80)).unwrap_or(false) {
             if let Ok(CtEvent::Key(k)) = event::read() {
+                // Raw mode swallows the SIGINT that Ctrl-C would otherwise raise, so
+                // handle Ctrl-C / Ctrl-D here as an explicit quit.
+                if k.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('d'))
+                {
+                    break Ok(());
+                }
                 if let Some(cmd) = state.on_key(k) {
                     let quit = matches!(cmd, Command::Quit);
                     let _ = ctx.send(cmd);
@@ -92,7 +120,11 @@ pub async fn run_tui(cfg: Config, ws: PathBuf, goal: String) -> Result<i32> {
     let _ = restore_terminal(&mut term);
     loop_res?;
 
+    // Tell the orchestrator to stop, and kill any in-flight agents so quitting the TUI
+    // never leaves orphaned claude/codex running. Killing the agents also makes the
+    // orchestrator's current iteration return promptly.
     let _ = ctx.send(Command::Quit);
+    crate::spawn::kill_all_agents();
     let rc = orch.await.unwrap_or(Ok(1)).unwrap_or(1);
     Ok(rc)
 }
