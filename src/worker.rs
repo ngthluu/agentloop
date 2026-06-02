@@ -12,6 +12,12 @@ pub fn worker_prompt(ws: &Path, item: &Value) -> String {
     let desc = item["desc"].as_str().unwrap_or("");
     let acc = item["acceptance"].as_str().unwrap_or("the change builds and tests pass");
     let prior = crate::inbox::prior_qa_block(ws, id).unwrap_or_default();
+    let design = std::fs::read_to_string(ws.join(".agentloop/state/design.md")).unwrap_or_default();
+    let design_block = if design.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nTECHNICAL DESIGN (.agentloop/state/design.md) — implement consistently with this:\n{design}")
+    };
     format!(r#"You are a WORKER on an autonomous app build. You are in a git worktree of the project.
 Implement exactly this item and nothing else:
 
@@ -29,8 +35,8 @@ Rules:
   Write {ws}/.agentloop/questions/{id}.json:
   {{"question":"<your question>","context":"<brief context>"}}
   and write the result file with {{"status":"needs_input","summary":"<what you need>"}} instead,
-  then stop. The user will answer and you will be re-dispatched with their answer.{prior}"#,
-        id = id, title = title, desc = desc, acc = acc, ws = ws.display(), prior = prior)
+  then stop. The user will answer and you will be re-dispatched with their answer.{prior}{design_block}"#,
+        id = id, title = title, desc = desc, acc = acc, ws = ws.display(), prior = prior, design_block = design_block)
 }
 
 /// Prompt for the conflict-resolver agent. It runs in the MAIN workspace, which is
