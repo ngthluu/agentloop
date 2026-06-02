@@ -136,6 +136,25 @@ fn tab_switches_focus_and_empty_enter_opens_job_detail() {
 }
 
 #[test]
+fn q_quits_from_job_detail_when_input_empty() {
+    use std::path::PathBuf;
+    let mut s = start("g");
+    s.apply(Event::JobDispatched {
+        id: "it-1".into(), label: "scaffold".into(), tool: "codex".into(),
+        model: "gpt-5".into(), log_path: Some(PathBuf::from("/tmp/x.log")),
+    });
+    s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // focus Jobs
+    s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // open detail (empty input)
+    assert!(s.in_job_detail());
+    // q with empty input quits from detail.
+    assert!(matches!(s.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)), Some(Command::Quit)));
+    // But with text typed, q types a literal q (does not quit).
+    s.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert!(s.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)).is_none());
+    assert_eq!(s.input_buffer(), "xq");
+}
+
+#[test]
 fn target_label_tracks_focus_and_inbox() {
     let mut s = start("g");
     assert_eq!(s.input_target_label(), "Add task");

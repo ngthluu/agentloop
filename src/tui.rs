@@ -205,6 +205,7 @@ impl AppState {
                 self.input.pop();
                 None
             }
+            KeyCode::Char('q') if self.input.trim().is_empty() => Some(Command::Quit),
             KeyCode::Char(c) => {
                 self.input.push(c);
                 None
@@ -276,7 +277,7 @@ impl AppState {
                 self.input.clear();
                 None
             }
-            KeyCode::Char('q') if self.input.is_empty() => Some(Command::Quit),
+            KeyCode::Char('q') if self.input.trim().is_empty() => Some(Command::Quit),
             KeyCode::Char(c) => {
                 self.input.push(c);
                 None
