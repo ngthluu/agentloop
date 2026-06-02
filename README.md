@@ -6,15 +6,26 @@ workers in parallel git worktrees, integrates their work, runs a planner-authore
 
 ## Requirements
 
-bash, git, jq, python3 + PyYAML, and the `claude` and `codex` CLIs on PATH.
+Rust (edition 2021), git, and the `claude` and/or `codex` CLIs on PATH.
+
+## Build
+
+```bash
+cargo build --release
+```
 
 ## Usage
 
 ```bash
-./agentloop.sh "Build a Python CLI todo app with a passing pytest suite" --workspace ./todo
+./target/release/agentloop "<goal>" --workspace ./app
 ```
 
-Options: `--config <path>`, `--fresh`, `--max-iterations N`, `--dry-run`.
+Options:
+
+- `--config <path>` — config.yaml path (default: `<workspace>/.agentloop/config.yaml`)
+- `--fresh` — wipe existing `.agentloop` state and start over
+- `--max-iterations N` — override `caps.max_iterations` from config
+- `--dry-run` — run the planner once and print the planned backlog; do not dispatch workers
 
 ## How it works
 
@@ -33,23 +44,26 @@ Options: `--config <path>`, `--fresh`, `--max-iterations N`, `--dry-run`.
 ## Layout
 
 ```
-agentloop.sh            entrypoint: arg parse, bootstrap, drive the loop
-helpers/yaml2json.py    YAML -> JSON (PyYAML)
-lib/config.sh           config parsing + role resolution
-lib/state.sh            backlog.json validate/query/mutate (atomic writes)
-lib/spawn.sh            timeout + claude/codex command building (+ fake-agent hook)
-lib/worktree.sh         worktree create/merge/cleanup
-lib/planner.sh          planner prompt + invoke + validate
-lib/worker.sh           worker prompt + dispatch
-lib/progress.sh         live progress dashboard (TTY) + event lines (non-TTY)
-lib/loop.sh             iteration loop, parallel dispatch, integration, termination
-templates/              default config.yaml + master.md
-tests/                  offline suite (fake agent) + opt-in live smoke test
+src/
+  main.rs          binary entry point
+  cli.rs           arg parsing (clap), workspace bootstrap, dry-run wiring
+  config.rs        Config / Caps / Role deserialization + helpers
+  state.rs         backlog.json validate / query / mutate (atomic writes)
+  spawn.rs         timeout + claude/codex command building (+ fake-agent hook)
+  worktree.rs      worktree create / merge / cleanup
+  planner.rs       planner prompt + invoke + validate
+  worker.rs        worker prompt + dispatch
+  events.rs        Reporter trait + EventLineReporter (stderr event lines)
+  orchestrator.rs  iteration loop, parallel dispatch, integration, termination
+  bin/fake_agent.rs  offline stub used by tests
+templates/
+  config.yaml      embedded default config (include_str!)
+  master.md        embedded default master status board
+tests/             offline integration suite (fake_agent, scripted stub, no tokens)
 ```
 
 ## Tests
 
 ```bash
-bash tests/run.sh          # offline, uses a fake agent (no tokens spent)
-bash tests/smoke_live.sh   # opt-in: real CLIs, builds a tiny app end-to-end
+cargo test          # offline; uses the in-crate fake_agent + scripted stub, no tokens spent
 ```
