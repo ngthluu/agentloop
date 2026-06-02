@@ -13,6 +13,13 @@ pub struct Job {
     pub frozen: Option<std::time::Duration>,
 }
 
+impl Job {
+    /// Frozen duration if finished, else live elapsed since dispatch, else None.
+    pub fn elapsed(&self) -> Option<std::time::Duration> {
+        self.frozen.or_else(|| self.started.map(|s| s.elapsed()))
+    }
+}
+
 #[derive(Clone)]
 pub struct Pending {
     pub item_id: String,
@@ -382,55 +389,64 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         .style(Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD));
     f.render_widget(status_bar, chunks[0]);
 
-    // --- Main area: jobs (left) + inbox (right) ---
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
+    // --- Main area: jobs (left) + inbox (right), or the job-detail view ---
+    if s.in_job_detail() {
+        render_job_detail(f, s, chunks[1]);
+    } else {
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[1]);
 
-    // Jobs list
-    let job_items: Vec<ListItem> = s
-        .jobs
-        .iter()
-        .map(|j| {
-            let glyph = status_glyph(&j.status);
-            ListItem::new(Line::from(format!(
-                " {} {} [{}/{}]",
-                glyph, j.label, j.tool, j.model
-            )))
-        })
-        .collect();
-    let jobs_list = List::new(job_items).block(
-        Block::default()
-            .title(" Jobs ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue)),
-    );
-    f.render_widget(jobs_list, main_chunks[0]);
+        // Jobs list
+        let job_items: Vec<ListItem> = s
+            .jobs
+            .iter()
+            .enumerate()
+            .map(|(i, j)| {
+                let glyph = status_glyph(&j.status);
+                let dur = j.elapsed().map(fmt_elapsed).unwrap_or_default();
+                let line = format!(" {} {} [{}/{}]  {}", glyph, j.label, j.tool, j.model, dur);
+                let style = if s.focus_is_jobs() && i == s.selected_job {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(line)).style(style)
+            })
+            .collect();
+        let jobs_border = if s.focus_is_jobs() { Color::Yellow } else { Color::Blue };
+        let jobs_list = List::new(job_items).block(
+            Block::default()
+                .title(" Jobs ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(jobs_border)),
+        );
+        f.render_widget(jobs_list, main_chunks[0]);
 
-    // Inbox list
-    let inbox_items: Vec<ListItem> = s
-        .inbox
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let style = if i == s.selected {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(format!(" ❓ {} — {}", p.label, p.text))).style(style)
-        })
-        .collect();
-    let inbox_list = List::new(inbox_items).block(
-        Block::default()
-            .title(" Inbox ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Magenta)),
-    );
-    f.render_widget(inbox_list, main_chunks[1]);
+        // Inbox list
+        let inbox_items: Vec<ListItem> = s
+            .inbox
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let style = if !s.focus_is_jobs() && i == s.selected {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(format!(" \u{2753} {} \u{2014} {}", p.label, p.text))).style(style)
+            })
+            .collect();
+        let inbox_border = if s.focus_is_jobs() { Color::Magenta } else { Color::Yellow };
+        let inbox_list = List::new(inbox_items).block(
+            Block::default()
+                .title(" Inbox ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(inbox_border)),
+        );
+        f.render_widget(inbox_list, main_chunks[1]);
+    }
 
     // --- Footer ---
     let footer_widget = if s.is_editing() {
@@ -473,7 +489,7 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         .style(Style::default().fg(Color::Green))
     } else {
         Paragraph::new(Line::from(
-            " [↑↓] navigate  [enter] answer  [a] add task  [q] quit",
+            " [tab] switch pane  [\u{2191}\u{2193}] navigate  [enter] open/answer  [a] add task  [q] quit",
         ))
         .block(
             Block::default()
@@ -483,4 +499,63 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         .style(Style::default().fg(Color::DarkGray))
     };
     f.render_widget(footer_widget, chunks[2]);
+}
+
+fn render_job_detail(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout::Rect) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::{Color, Style};
+    use ratatui::text::Line;
+    use ratatui::widgets::{Block, Borders, Paragraph};
+
+    let job = s.jobs.get(s.selected_job);
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .split(area);
+
+    let (title, header_lines) = match job {
+        Some(j) => {
+            let dur = j.elapsed().map(fmt_elapsed).unwrap_or_default();
+            (
+                format!(" Job: {} \u{2014} {} ", j.id, j.label),
+                vec![Line::from(format!(
+                    " status: {} {}   role/tool: {}/{}   {}",
+                    status_glyph(&j.status), j.status, j.tool, j.model, dur
+                ))],
+            )
+        }
+        None => (" Job ".to_string(), vec![Line::from(" (no job selected)")]),
+    };
+
+    let header = Paragraph::new(header_lines).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    f.render_widget(header, parts[0]);
+
+    // Log tail.
+    let lines: Vec<Line> = match job.and_then(|j| j.log_path.as_deref()) {
+        Some(path) => tail_file(path, 400, 32 * 1024)
+            .into_iter()
+            .map(Line::from)
+            .collect(),
+        None => vec![Line::from("(no output yet)")],
+    };
+    let body = parts[1];
+    // Show the lines that fit, honoring log_scroll as an offset from the bottom.
+    let visible = body.height.saturating_sub(2) as usize; // minus the borders
+    let total = lines.len();
+    let scroll = (s.log_scroll as usize).min(total.saturating_sub(visible.max(1)));
+    let end = total.saturating_sub(scroll);
+    let start = end.saturating_sub(visible);
+    let shown: Vec<Line> = lines[start..end].to_vec();
+    let log = Paragraph::new(shown).block(
+        Block::default()
+            .title(" log \u{2014} [\u{2191}\u{2193}] scroll  [esc] back ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(log, body);
 }
