@@ -66,3 +66,16 @@ fn planner_prompt_includes_pending_requests() {
     assert!(p.contains("add a --due flag"));
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn planner_prompt_maintains_design_and_build_graph() {
+    let ws = ws_with_state();
+    let p = planner::planner_prompt(&ws, 3);
+    // Planner owns the technical design now.
+    assert!(p.contains("design.md"), "planner is told to maintain design.md");
+    // Work items are all role=build; no architect/fix/trivial.
+    assert!(p.contains(r#"role="build""#), "items are tagged build");
+    assert!(!p.contains("architect"), "architect role removed");
+    // Dependency-aware decomposition is requested.
+    assert!(p.contains("dependency-aware"), "asks for a dependency-aware task graph");
+}
