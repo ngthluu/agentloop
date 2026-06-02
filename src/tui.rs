@@ -519,7 +519,7 @@ fn render_job_detail(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout
             (
                 format!(" Job: {} \u{2014} {} ", j.id, j.label),
                 vec![Line::from(format!(
-                    " status: {} {}   role/tool: {}/{}   {}",
+                    " status: {} {}   tool: {}/{}   {}",
                     status_glyph(&j.status), j.status, j.tool, j.model, dur
                 ))],
             )
