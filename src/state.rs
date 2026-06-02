@@ -83,3 +83,10 @@ pub fn increment_attempts(path: &Path, id: &str) -> Result<()> {
 pub fn item<'a>(v: &'a Value, id: &str) -> Option<&'a Value> {
     v["items"].as_array()?.iter().find(|i| i["id"] == json!(id))
 }
+
+pub fn blocked_count(path: &Path) -> Result<i64> {
+    let v = read(path)?;
+    let empty = vec![];
+    Ok(v["items"].as_array().unwrap_or(&empty).iter()
+        .filter(|i| i["status"] == "blocked").count() as i64)
+}

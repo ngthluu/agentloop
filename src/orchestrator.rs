@@ -128,13 +128,36 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     let mut merged = 0u32;
     for id in &dispatched {
         let rfile = ws.join(format!(".agentloop/results/{id}.json"));
-        let result_done = std::fs::read_to_string(&rfile)
+        let result_value: Option<Value> = std::fs::read_to_string(&rfile)
             .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .map(|v| v["status"] == "done")
-            .unwrap_or(false);
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+        let status = result_value.as_ref().map(|v| v["status"].clone()).unwrap_or(Value::Null);
         let branch = format!("item/{id}");
 
+        if status == "needs_input" {
+            // Agent is blocked on a user decision. Surface the question; block the
+            // item; do not merge. The question file lives in the main workspace
+            // (.agentloop/questions/<id>.json), so it survives worktree removal.
+            if let Ok(q) = crate::inbox::read_question(ws, id) {
+                let label = state::read(&bk)
+                    .ok()
+                    .as_ref()
+                    .and_then(|v| state::item(v, id))
+                    .and_then(|i| i["title"].as_str().map(String::from))
+                    .unwrap_or_default();
+                reporter.question(id, &label, &q.question, &q.context);
+                state::set_status(&bk, id, "blocked", &q.question)?;
+            } else {
+                // Malformed/missing question file: treat as a normal non-done bounce.
+                state::set_status(&bk, id, "ready", "needs_input without a question file")?;
+                reporter.status(id, "bounced", "", "");
+            }
+            worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
+            let _ = std::fs::remove_file(&rfile);
+            continue;
+        }
+
+        let result_done = status == "done";
         if result_done {
             if !worktree::has_commits_ahead(ws, &branch) {
                 state::set_status(&bk, id, "ready", "worker reported done but made no commits")?;
@@ -155,6 +178,27 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         let _ = std::fs::remove_file(&rfile);
     }
     Ok(merged)
+}
+
+/// Apply a user's answer to a blocked item: persist it, consume the question,
+/// flip the item blocked->ready so it is re-dispatched with the prior Q&A.
+pub fn apply_answer(ws: &Path, item_id: &str, text: &str) -> Result<()> {
+    let bk = ws.join(".agentloop/state/backlog.json");
+    // The question text: prefer the live question file; fall back to the item's notes
+    // (where the needs_input handler stashed it) if the file was already consumed.
+    let question = match crate::inbox::read_question(ws, item_id) {
+        Ok(q) => q.question,
+        Err(_) => {
+            let v = state::read(&bk)?;
+            state::item(&v, item_id)
+                .and_then(|i| i["notes"].as_str().map(String::from))
+                .unwrap_or_default()
+        }
+    };
+    crate::inbox::record_answer(ws, item_id, &question, text)?;
+    let _ = crate::inbox::consume_question(ws, item_id);
+    state::set_status(&bk, item_id, "ready", "answered; re-dispatching")?;
+    Ok(())
 }
 
 /// Drive iterations until DONE (0), cap/stall (1), or hard error (Err).
@@ -184,6 +228,14 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
         if gate_state == "pass" && open == 0 {
             eprintln!("DONE");
             return Ok(0);
+        }
+
+        let blocked = state::blocked_count(&bk)?;
+        // Headless run can't answer questions. If the only open work is blocked on
+        // the user, stop gracefully rather than spin or false-stall.
+        if open > 0 && open == blocked {
+            eprintln!("STOP: blocked on user input (headless)");
+            return Ok(1);
         }
 
         if merged == 0 && gate_state == prev_gate {
