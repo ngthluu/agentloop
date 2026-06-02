@@ -155,6 +155,9 @@ pub async fn run() -> Result<()> {
 
     use std::io::IsTerminal;
     let is_tty = std::io::stdout().is_terminal();
+    // Headless and dry-run runs: a SIGINT (Ctrl-C) or SIGTERM kills in-flight agents and
+    // exits, so an interrupt never orphans claude/codex. The TUI path installs its own
+    // handler (it must also restore the terminal), so skip it there.
     if args.dry_run || !is_tty {
         install_kill_on_signal();
     }
