@@ -353,6 +353,20 @@ pub async fn run_interactive(
     let mut window_start = Instant::now();   // budget window; reset on re-engage
     let mut iters_this_window = 0u32;        // max_iterations is per-engagement
 
+    // Wait for the TUI to commit a goal (the goal-entry screen) before doing any work.
+    // Nothing — no planner, no workers — runs until StartRun arrives.
+    loop {
+        match crx.recv().await {
+            None | Some(Command::Quit) => return Ok(0),
+            Some(Command::StartRun { goal }) => {
+                let _ = crate::cli::commit_goal(ws, &goal);
+                break;
+            }
+            // Stray answer/add-task before the run starts: ignore.
+            Some(Command::AnswerQuestion { .. }) | Some(Command::AddTask { .. }) => {}
+        }
+    }
+
     'outer: loop {
         // --- WORKING phase ---
         let go_standby = 'working: loop {
@@ -362,6 +376,7 @@ pub async fn run_interactive(
                     Command::Quit => return Ok(0),
                     Command::AnswerQuestion { item_id, text } => { let _ = apply_answer(ws, &item_id, &text); }
                     Command::AddTask { request } => { let _ = crate::requests::append(ws, &request); }
+                    Command::StartRun { .. } => {}
                 }
             }
 
@@ -386,6 +401,7 @@ pub async fn run_interactive(
                     None | Some(Command::Quit) => return Ok(0),
                     Some(Command::AnswerQuestion { item_id, text }) => { let _ = apply_answer(ws, &item_id, &text); }
                     Some(Command::AddTask { request }) => { let _ = crate::requests::append(ws, &request); }
+                    Some(Command::StartRun { .. }) => {}
                 }
                 stalls = 0;
                 prev_gate = gate_state.to_string();
@@ -406,6 +422,7 @@ pub async fn run_interactive(
                 None | Some(Command::Quit) => return Ok(0),
                 Some(Command::AnswerQuestion { item_id, text }) => { let _ = apply_answer(ws, &item_id, &text); }
                 Some(Command::AddTask { request }) => { let _ = crate::requests::append(ws, &request); }
+                Some(Command::StartRun { .. }) => {}
             }
             // Re-engage: fresh budget window + iteration allowance, reset stall.
             window_start = Instant::now();
