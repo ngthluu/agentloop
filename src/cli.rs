@@ -48,7 +48,7 @@ pub fn bootstrap_workspace(ws: &Path, goal: &str, config: Option<&Path>) -> Resu
     std::fs::create_dir_all(ws)?;
     let ws = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
     let meta = ws.join(".agentloop");
-    for sub in ["state", "results", "logs", "worktrees"] {
+    for sub in ["state", "results", "logs", "worktrees", "questions", "answers"] {
         std::fs::create_dir_all(meta.join(sub))?;
     }
 
