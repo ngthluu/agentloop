@@ -62,6 +62,7 @@ pub struct AppState {
     view: View,
     selected_job: usize,
     log_scroll: u16,
+    started: std::time::Instant,
 }
 
 impl AppState {
@@ -81,6 +82,7 @@ impl AppState {
             view: View::List,
             selected_job: 0,
             log_scroll: 0,
+            started: std::time::Instant::now(),
         }
     }
 
@@ -293,6 +295,11 @@ impl AppState {
     pub fn in_job_detail(&self) -> bool {
         self.view == View::JobDetail
     }
+
+    /// Wall-clock time since the session (TUI) started.
+    pub fn total_elapsed(&self) -> std::time::Duration {
+        self.started.elapsed()
+    }
 }
 
 /// Human working-time: "{s}s" under a minute, "{m}m{s:02}s" under an hour,
@@ -374,15 +381,16 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         .split(area);
 
     // --- Top status bar ---
+    let total = fmt_elapsed(s.total_elapsed());
     let status_text = if s.standby {
         format!(
-            " ✓ DONE · standby  │  {}  │  iter {}  │  gate: {}  │  open: {}  │  ❓{}",
-            s.goal, s.iter, s.gate, s.open, s.inbox.len()
+            " ✓ DONE · standby  │  {}  │  iter {}  │  gate: {}  │  open: {}  │  ❓{}  │  ⏱ {}",
+            s.goal, s.iter, s.gate, s.open, s.inbox.len(), total
         )
     } else {
         format!(
-            " {}  │  iter {}  │  gate: {}  │  open: {}  │  ❓{}",
-            s.goal, s.iter, s.gate, s.open, s.inbox.len()
+            " {}  │  iter {}  │  gate: {}  │  open: {}  │  ❓{}  │  ⏱ {}",
+            s.goal, s.iter, s.gate, s.open, s.inbox.len(), total
         )
     };
     let status_bar = Paragraph::new(status_text)
@@ -394,8 +402,8 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         render_job_detail(f, s, chunks[1]);
     } else {
         let main_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(chunks[1]);
 
         // Jobs list
