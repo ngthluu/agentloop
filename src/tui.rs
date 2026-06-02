@@ -8,6 +8,9 @@ pub struct Job {
     pub tool: String,
     pub model: String,
     pub status: String,
+    pub log_path: Option<std::path::PathBuf>,
+    pub started: Option<std::time::Instant>,
+    pub frozen: Option<std::time::Duration>,
 }
 
 #[derive(Clone)]
@@ -56,18 +59,35 @@ impl AppState {
 
     pub fn apply(&mut self, ev: Event) {
         match ev {
-            Event::JobDispatched { id, label, tool, model, log_path: _ } => {
+            Event::JobDispatched { id, label, tool, model, log_path } => {
+                let now = std::time::Instant::now();
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
                     j.label = label;
                     j.tool = tool;
                     j.model = model;
                     j.status = "running".into();
+                    j.log_path = log_path;
+                    j.started = Some(now);
+                    j.frozen = None;
                 } else {
-                    self.jobs.push(Job { id, label, tool, model, status: "running".into() });
+                    self.jobs.push(Job {
+                        id,
+                        label,
+                        tool,
+                        model,
+                        status: "running".into(),
+                        log_path,
+                        started: Some(now),
+                        frozen: None,
+                    });
                 }
             }
             Event::JobStatus { id, status } => {
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
+                    let terminal = matches!(status.as_str(), "merged" | "done" | "failed" | "bounced");
+                    if terminal && j.frozen.is_none() {
+                        j.frozen = j.started.map(|s| s.elapsed());
+                    }
                     j.status = status;
                 }
             }

@@ -49,3 +49,24 @@ fn standby_event_sets_flag() {
     s.apply(Event::EnteredStandby);
     assert!(s.standby);
 }
+
+#[test]
+fn dispatch_starts_timer_and_stores_log_path_then_freezes() {
+    use std::path::PathBuf;
+    let mut s = AppState::new("g".into());
+    s.apply(Event::JobDispatched {
+        id: "it-1".into(),
+        label: "scaffold".into(),
+        tool: "codex".into(),
+        model: "gpt-5".into(),
+        log_path: Some(PathBuf::from("/tmp/item-it-1.log")),
+    });
+    let j = s.jobs.iter().find(|j| j.id == "it-1").unwrap();
+    assert!(j.started.is_some(), "timer starts on dispatch");
+    assert!(j.frozen.is_none(), "not frozen while running");
+    assert_eq!(j.log_path.as_deref(), Some(std::path::Path::new("/tmp/item-it-1.log")));
+
+    s.apply(Event::JobStatus { id: "it-1".into(), status: "merged".into() });
+    let j = s.jobs.iter().find(|j| j.id == "it-1").unwrap();
+    assert!(j.frozen.is_some(), "timer freezes on a terminal status");
+}
