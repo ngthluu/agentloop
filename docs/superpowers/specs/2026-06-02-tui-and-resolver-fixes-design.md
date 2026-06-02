@@ -274,9 +274,10 @@ unchanged by this work:
   `status: failed`).
 - `needs_input without a question file` — malformed needs_input result.
 
-To make "why it occurs" visible, surface the item's `notes` (the bounce reason already
-stored by `state::set_status`) in the TUI — e.g. appended to the job line and/or shown in
-the job-detail header — so the reason is visible at a glance rather than only in
-`backlog.json`. This is a small additive change to `tui.rs` (carry a `notes` field on
-`Job` populated from a status note, or extend the `JobStatus` event with an optional
-note).
+The bounce reason is already persisted by `state::set_status` in `backlog.json` (`notes`)
+and, after fix #1, the git output that explains a merge conflict lands in
+`.agentloop/logs/run.log`. **Deferred (out of scope for this plan):** surfacing the
+`notes` string directly in the TUI job line/detail. It requires threading a note through
+the `Reporter::status` trait and the `Event::JobStatus` variant, which would change
+existing public signatures and tests; it is a follow-up enhancement, not part of this
+iteration.
