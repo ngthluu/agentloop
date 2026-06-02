@@ -33,6 +33,28 @@ Rules:
         id = id, title = title, desc = desc, acc = acc, ws = ws.display(), prior = prior)
 }
 
+/// Prompt for the conflict-resolver agent. It runs in the MAIN workspace, which is
+/// mid-merge with conflicts from `item/<id>`.
+pub fn resolver_prompt(ws: &Path, item: &Value) -> String {
+    let id = item["id"].as_str().unwrap_or("");
+    let title = item["title"].as_str().unwrap_or("");
+    let desc = item["desc"].as_str().unwrap_or("");
+    format!(r#"You are a MERGE-CONFLICT RESOLVER on an autonomous app build. The git repo at
+{ws} is in the middle of merging branch item/{id} into the main branch and has conflicts.
+Resolve every conflict so the result reflects the intent of BOTH sides for this item:
+
+  id:    {id}
+  title: {title}
+  task:  {desc}
+
+Steps:
+- Inspect the conflicts (git status; git diff). Resolve all <<<<<<< ======= >>>>>>>
+  markers, keeping a correct result that builds.
+- `git add` the resolved files, then `git commit --no-edit` to complete the merge.
+- Do not change unrelated files and do not start new work."#,
+        ws = ws.display(), id = id, title = title, desc = desc)
+}
+
 /// Dispatch one item: returns agent_run's exit code; the result file is the source of truth.
 pub async fn worker_dispatch(cfg: &Config, ws: &Path, item: &Value, wt: &Path, log: &Path, t: Duration) -> Result<i32> {
     let role = item["role"].as_str().unwrap_or("build");
