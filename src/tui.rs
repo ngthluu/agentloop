@@ -8,6 +8,16 @@ pub struct Job {
     pub tool: String,
     pub model: String,
     pub status: String,
+    pub log_path: Option<std::path::PathBuf>,
+    pub started: Option<std::time::Instant>,
+    pub frozen: Option<std::time::Duration>,
+}
+
+impl Job {
+    /// Frozen duration if finished, else live elapsed since dispatch, else None.
+    pub fn elapsed(&self) -> Option<std::time::Duration> {
+        self.frozen.or_else(|| self.started.map(|s| s.elapsed()))
+    }
 }
 
 #[derive(Clone)]
@@ -25,6 +35,18 @@ enum Mode {
     AddingTask,
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum Focus {
+    Jobs,
+    Inbox,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum View {
+    List,
+    JobDetail,
+}
+
 pub struct AppState {
     pub goal: String,
     pub jobs: Vec<Job>,
@@ -36,6 +58,10 @@ pub struct AppState {
     pub standby: bool,
     mode: Mode,
     input: String,
+    focus: Focus,
+    view: View,
+    selected_job: usize,
+    log_scroll: u16,
 }
 
 impl AppState {
@@ -51,23 +77,44 @@ impl AppState {
             standby: false,
             mode: Mode::Normal,
             input: String::new(),
+            focus: Focus::Inbox,
+            view: View::List,
+            selected_job: 0,
+            log_scroll: 0,
         }
     }
 
     pub fn apply(&mut self, ev: Event) {
         match ev {
-            Event::JobDispatched { id, label, tool, model } => {
+            Event::JobDispatched { id, label, tool, model, log_path } => {
+                let now = std::time::Instant::now();
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
                     j.label = label;
                     j.tool = tool;
                     j.model = model;
                     j.status = "running".into();
+                    j.log_path = log_path;
+                    j.started = Some(now);
+                    j.frozen = None;
                 } else {
-                    self.jobs.push(Job { id, label, tool, model, status: "running".into() });
+                    self.jobs.push(Job {
+                        id,
+                        label,
+                        tool,
+                        model,
+                        status: "running".into(),
+                        log_path,
+                        started: Some(now),
+                        frozen: None,
+                    });
                 }
             }
             Event::JobStatus { id, status } => {
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
+                    let terminal = matches!(status.as_str(), "merged" | "done" | "failed" | "bounced");
+                    if terminal && j.frozen.is_none() {
+                        j.frozen = j.started.map(|s| s.elapsed());
+                    }
                     j.status = status;
                 }
             }
@@ -91,34 +138,90 @@ impl AppState {
     /// Map a key to an optional Command. Returns None when the key only changes UI state.
     pub fn on_key(&mut self, k: KeyEvent) -> Option<Command> {
         match self.mode {
-            Mode::Normal => match k.code {
-                KeyCode::Char('q') => Some(Command::Quit),
-                KeyCode::Char('a') => {
-                    self.mode = Mode::AddingTask;
-                    self.input.clear();
-                    None
-                }
-                KeyCode::Up => {
-                    if self.selected > 0 {
-                        self.selected -= 1;
+            Mode::Normal => {
+                // Detail view has its own keys.
+                if self.view == View::JobDetail {
+                    // Tab / 'a' / Enter are intentionally inert in detail view.
+                    match k.code {
+                        KeyCode::Esc => {
+                            self.view = View::List;
+                            self.log_scroll = 0;
+                        }
+                        KeyCode::Up => {
+                            self.log_scroll = self.log_scroll.saturating_add(1);
+                        }
+                        KeyCode::Down => {
+                            self.log_scroll = self.log_scroll.saturating_sub(1);
+                        }
+                        KeyCode::Char('q') => return Some(Command::Quit),
+                        _ => {}
                     }
-                    None
+                    return None;
                 }
-                KeyCode::Down => {
-                    if self.selected + 1 < self.inbox.len() {
-                        self.selected += 1;
-                    }
-                    None
-                }
-                KeyCode::Enter => {
-                    if !self.inbox.is_empty() {
-                        self.mode = Mode::Answering;
+                match k.code {
+                    KeyCode::Char('q') => Some(Command::Quit),
+                    KeyCode::Char('a') => {
+                        self.mode = Mode::AddingTask;
                         self.input.clear();
+                        None
                     }
-                    None
+                    KeyCode::Tab => {
+                        self.focus = match self.focus {
+                            Focus::Jobs => Focus::Inbox,
+                            Focus::Inbox => Focus::Jobs,
+                        };
+                        None
+                    }
+                    KeyCode::Up => {
+                        match self.focus {
+                            Focus::Jobs => {
+                                if self.selected_job > 0 {
+                                    self.selected_job -= 1;
+                                }
+                            }
+                            Focus::Inbox => {
+                                if self.selected > 0 {
+                                    self.selected -= 1;
+                                }
+                            }
+                        }
+                        None
+                    }
+                    KeyCode::Down => {
+                        match self.focus {
+                            Focus::Jobs => {
+                                if self.selected_job + 1 < self.jobs.len() {
+                                    self.selected_job += 1;
+                                }
+                            }
+                            Focus::Inbox => {
+                                if self.selected + 1 < self.inbox.len() {
+                                    self.selected += 1;
+                                }
+                            }
+                        }
+                        None
+                    }
+                    KeyCode::Enter => {
+                        match self.focus {
+                            Focus::Jobs => {
+                                if self.selected_job < self.jobs.len() {
+                                    self.view = View::JobDetail;
+                                    self.log_scroll = 0;
+                                }
+                            }
+                            Focus::Inbox => {
+                                if !self.inbox.is_empty() {
+                                    self.mode = Mode::Answering;
+                                    self.input.clear();
+                                }
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
             Mode::Answering => match k.code {
                 KeyCode::Esc => {
                     self.mode = Mode::Normal;
@@ -182,6 +285,61 @@ impl AppState {
     pub fn mode_is_answering(&self) -> bool {
         self.mode == Mode::Answering
     }
+
+    pub fn focus_is_jobs(&self) -> bool {
+        self.focus == Focus::Jobs
+    }
+
+    pub fn in_job_detail(&self) -> bool {
+        self.view == View::JobDetail
+    }
+}
+
+/// Human working-time: "{s}s" under a minute, "{m}m{s:02}s" under an hour,
+/// else "{h}h{m:02}m".
+pub fn fmt_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// Last `max_lines` lines of `path` (reading at most the final `max_bytes`),
+/// for the job-detail log view. Returns a single "(no output yet)" line when the
+/// file is missing or empty.
+pub fn tail_file(path: &std::path::Path, max_lines: usize, max_bytes: u64) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let placeholder = || vec!["(no output yet)".to_string()];
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return placeholder(),
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if len == 0 {
+        return placeholder();
+    }
+    let start = len.saturating_sub(max_bytes);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return placeholder();
+    }
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return placeholder();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    if lines.len() > max_lines {
+        lines = lines.split_off(lines.len() - max_lines);
+    }
+    if lines.is_empty() {
+        placeholder()
+    } else {
+        lines
+    }
 }
 
 fn status_glyph(status: &str) -> &'static str {
@@ -231,55 +389,64 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         .style(Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD));
     f.render_widget(status_bar, chunks[0]);
 
-    // --- Main area: jobs (left) + inbox (right) ---
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
+    // --- Main area: jobs (left) + inbox (right), or the job-detail view ---
+    if s.in_job_detail() {
+        render_job_detail(f, s, chunks[1]);
+    } else {
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[1]);
 
-    // Jobs list
-    let job_items: Vec<ListItem> = s
-        .jobs
-        .iter()
-        .map(|j| {
-            let glyph = status_glyph(&j.status);
-            ListItem::new(Line::from(format!(
-                " {} {} [{}/{}]",
-                glyph, j.label, j.tool, j.model
-            )))
-        })
-        .collect();
-    let jobs_list = List::new(job_items).block(
-        Block::default()
-            .title(" Jobs ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Blue)),
-    );
-    f.render_widget(jobs_list, main_chunks[0]);
+        // Jobs list
+        let job_items: Vec<ListItem> = s
+            .jobs
+            .iter()
+            .enumerate()
+            .map(|(i, j)| {
+                let glyph = status_glyph(&j.status);
+                let dur = j.elapsed().map(fmt_elapsed).unwrap_or_default();
+                let line = format!(" {} {} [{}/{}]  {}", glyph, j.label, j.tool, j.model, dur);
+                let style = if s.focus_is_jobs() && i == s.selected_job {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(line)).style(style)
+            })
+            .collect();
+        let jobs_border = if s.focus_is_jobs() { Color::Yellow } else { Color::Blue };
+        let jobs_list = List::new(job_items).block(
+            Block::default()
+                .title(" Jobs ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(jobs_border)),
+        );
+        f.render_widget(jobs_list, main_chunks[0]);
 
-    // Inbox list
-    let inbox_items: Vec<ListItem> = s
-        .inbox
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let style = if i == s.selected {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(format!(" ❓ {} — {}", p.label, p.text))).style(style)
-        })
-        .collect();
-    let inbox_list = List::new(inbox_items).block(
-        Block::default()
-            .title(" Inbox ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Magenta)),
-    );
-    f.render_widget(inbox_list, main_chunks[1]);
+        // Inbox list
+        let inbox_items: Vec<ListItem> = s
+            .inbox
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let style = if !s.focus_is_jobs() && i == s.selected {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(format!(" \u{2753} {} \u{2014} {}", p.label, p.text))).style(style)
+            })
+            .collect();
+        let inbox_border = if s.focus_is_jobs() { Color::Magenta } else { Color::Yellow };
+        let inbox_list = List::new(inbox_items).block(
+            Block::default()
+                .title(" Inbox ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(inbox_border)),
+        );
+        f.render_widget(inbox_list, main_chunks[1]);
+    }
 
     // --- Footer ---
     let footer_widget = if s.is_editing() {
@@ -322,7 +489,7 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         .style(Style::default().fg(Color::Green))
     } else {
         Paragraph::new(Line::from(
-            " [↑↓] navigate  [enter] answer  [a] add task  [q] quit",
+            " [tab] switch pane  [\u{2191}\u{2193}] navigate  [enter] open/answer  [a] add task  [q] quit",
         ))
         .block(
             Block::default()
@@ -332,4 +499,63 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         .style(Style::default().fg(Color::DarkGray))
     };
     f.render_widget(footer_widget, chunks[2]);
+}
+
+fn render_job_detail(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout::Rect) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::{Color, Style};
+    use ratatui::text::Line;
+    use ratatui::widgets::{Block, Borders, Paragraph};
+
+    let job = s.jobs.get(s.selected_job);
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .split(area);
+
+    let (title, header_lines) = match job {
+        Some(j) => {
+            let dur = j.elapsed().map(fmt_elapsed).unwrap_or_default();
+            (
+                format!(" Job: {} \u{2014} {} ", j.id, j.label),
+                vec![Line::from(format!(
+                    " status: {} {}   tool: {}/{}   {}",
+                    status_glyph(&j.status), j.status, j.tool, j.model, dur
+                ))],
+            )
+        }
+        None => (" Job ".to_string(), vec![Line::from(" (no job selected)")]),
+    };
+
+    let header = Paragraph::new(header_lines).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    f.render_widget(header, parts[0]);
+
+    // Log tail.
+    let lines: Vec<Line> = match job.and_then(|j| j.log_path.as_deref()) {
+        Some(path) => tail_file(path, 400, 32 * 1024)
+            .into_iter()
+            .map(Line::from)
+            .collect(),
+        None => vec![Line::from("(no output yet)")],
+    };
+    let body = parts[1];
+    // Show the lines that fit, honoring log_scroll as an offset from the bottom.
+    let visible = body.height.saturating_sub(2) as usize; // minus the borders
+    let total = lines.len();
+    let scroll = (s.log_scroll as usize).min(total.saturating_sub(visible.max(1)));
+    let end = total.saturating_sub(scroll);
+    let start = end.saturating_sub(visible);
+    let shown: Vec<Line> = lines[start..end].to_vec();
+    let log = Paragraph::new(shown).block(
+        Block::default()
+            .title(" log \u{2014} [\u{2191}\u{2193}] scroll  [esc] back ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(log, body);
 }

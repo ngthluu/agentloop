@@ -1,11 +1,12 @@
 use chrono::Local;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 /// Progress sink. Phase 1 uses EventLineReporter (stderr lines, mirroring the
 /// non-TTY behavior of lib/progress.sh). Phase 2 adds ChannelReporter (TUI).
 pub trait Reporter: Send + Sync {
-    /// A job (planner or worker) has been dispatched.
-    fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str);
+    /// A job (planner or worker) has been dispatched. `log` is the job's log file.
+    fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str, log: Option<&Path>);
     /// A job changed status (done/failed/merged/bounced/...).
     fn status(&self, id: &str, status: &str, tool: &str, model: &str);
     /// End-of-iteration summary line.
@@ -23,7 +24,7 @@ fn hms() -> String {
 }
 
 impl Reporter for EventLineReporter {
-    fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str) {
+    fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str, _log: Option<&Path>) {
         eprintln!("{}  dispatch {:<10} {}/{}  {}", hms(), id, tool, model, label);
     }
     fn status(&self, id: &str, status: &str, tool: &str, model: &str) {
@@ -48,6 +49,7 @@ pub enum Event {
         label: String,
         tool: String,
         model: String,
+        log_path: Option<PathBuf>,
     },
     JobStatus {
         id: String,
@@ -89,12 +91,13 @@ impl ChannelReporter {
 }
 
 impl Reporter for ChannelReporter {
-    fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str) {
+    fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str, log: Option<&Path>) {
         let _ = self.tx.send(Event::JobDispatched {
             id: id.into(),
             label: label.into(),
             tool: tool.into(),
             model: model.into(),
+            log_path: log.map(|p| p.to_path_buf()),
         });
     }
     fn status(&self, id: &str, status: &str, _tool: &str, _model: &str) {

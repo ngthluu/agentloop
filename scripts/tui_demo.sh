@@ -14,6 +14,14 @@
 #   4. Press  a , type  also build it-2 , press enter. The planner folds it into it-2,
 #      the worker builds it, gate passes, back to standby.
 #   5. Press  q  to quit; the terminal is restored cleanly (no leftover raw mode).
+#   6. The frame stays in one place — no panel piling up in scrollback while the
+#      planner/workers run (stderr now goes to .agentloop/logs/run.log).
+#   7. Press  tab  to focus the Jobs pane (its border highlights). Use  up/down  to
+#      pick a job, then  enter  to open its detail view: a header with status, role,
+#      tool/model, and a live ticking working-time, plus the tail of the job's log.
+#   8. Press  esc  to return to the two-pane list.
+#   9. Each job row shows a working-time that ticks while running and freezes when the
+#      job merges/fails.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"

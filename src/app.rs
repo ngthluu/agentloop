@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::io::Stdout;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +36,53 @@ fn restore_terminal(term: &mut Term) -> Result<()> {
     Ok(())
 }
 
+/// While alive, the process's stderr (fd 2) is redirected to a log file so the
+/// orchestrator's `eprintln!` diagnostics don't scroll over the alt-screen TUI.
+/// Dropping it restores the original stderr. Unix-only; a no-op elsewhere.
+#[cfg(unix)]
+struct StderrRedirect {
+    saved: std::os::unix::io::RawFd,
+}
+
+#[cfg(unix)]
+impl StderrRedirect {
+    fn to_log(log_dir: &Path) -> Option<Self> {
+        use std::os::unix::io::AsRawFd;
+        let _ = std::fs::create_dir_all(log_dir);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_dir.join("run.log"))
+            .ok()?;
+        let stderr_fd = std::io::stderr().as_raw_fd();
+        // SAFETY: dup/dup2/close are plain libc calls operating on valid fds; the
+        // file stays open for the duration of the dup2 call. nix's safe wrappers for
+        // these are gated behind the `fs` feature, which this crate does not enable.
+        let saved = unsafe { nix::libc::dup(stderr_fd) };
+        if saved < 0 {
+            return None;
+        }
+        if unsafe { nix::libc::dup2(file.as_raw_fd(), stderr_fd) } < 0 {
+            unsafe { nix::libc::close(saved) };
+            return None;
+        }
+        Some(StderrRedirect { saved })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StderrRedirect {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        let stderr_fd = std::io::stderr().as_raw_fd();
+        // SAFETY: see `to_log`; `self.saved` is a valid fd we own and close here.
+        unsafe {
+            nix::libc::dup2(self.saved, stderr_fd);
+            nix::libc::close(self.saved);
+        }
+    }
+}
+
 /// On SIGTERM while the TUI is up, raw mode is on and the alt screen is active. Restore
 /// the terminal best-effort, kill in-flight agents, and exit so nothing is orphaned.
 #[cfg(unix)]
@@ -68,6 +116,8 @@ pub async fn run_tui(cfg: Config, ws: PathBuf, goal: String) -> Result<i32> {
     });
 
     let mut term = setup_terminal()?;
+    #[cfg(unix)]
+    let _stderr_guard = StderrRedirect::to_log(&ws.join(".agentloop/logs"));
     let mut state = AppState::new(goal);
 
     // Track whether the orchestrator has disconnected its event sender.
