@@ -29,3 +29,23 @@ fn key_input_maps_to_commands() {
 
     assert!(matches!(s.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)), Some(Command::Quit)));
 }
+
+#[test]
+fn add_task_key_path_emits_command() {
+    use agentloop::events::Command;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut s = agentloop::tui::AppState::new("g".into());
+
+    assert!(s.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).is_none()); // open editor
+    for c in "due flag".chars() { s.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)); }
+    let cmd = s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(cmd, Some(Command::AddTask { ref request }) if request == "due flag"));
+}
+
+#[test]
+fn standby_event_sets_flag() {
+    use agentloop::events::Event;
+    let mut s = agentloop::tui::AppState::new("g".into());
+    s.apply(Event::EnteredStandby);
+    assert!(s.standby);
+}
