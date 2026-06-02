@@ -74,6 +74,7 @@ pub enum Event {
 /// UI -> orchestrator.
 #[derive(Debug, Clone)]
 pub enum Command {
+    StartRun { goal: String },
     AnswerQuestion { item_id: String, text: String },
     AddTask { request: String },
     Quit,

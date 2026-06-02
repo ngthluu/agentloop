@@ -114,6 +114,24 @@ pub fn fold_rerun_goal(ws: &Path, goal: &str) -> Result<()> {
     Ok(())
 }
 
+/// Commit the goal the user typed on the entry screen. On a fresh workspace (blank
+/// goal.md) the text is written directly. Otherwise it is treated as additive context
+/// via `fold_rerun_goal` (appended + queued as a pending request; identical text is a
+/// no-op plain resume).
+pub fn commit_goal(ws: &Path, goal: &str) -> Result<()> {
+    let goalf = ws.join(".agentloop/state/goal.md");
+    let existing = std::fs::read_to_string(&goalf).unwrap_or_default();
+    if existing.trim().is_empty() {
+        let trimmed = goal.trim();
+        if !trimmed.is_empty() {
+            std::fs::write(&goalf, format!("{trimmed}\n"))?;
+        }
+        Ok(())
+    } else {
+        fold_rerun_goal(ws, goal)
+    }
+}
+
 /// The goal text to use: the CLI argument if non-blank, else the persisted
 /// `.agentloop/state/goal.md`, else empty (a fresh workspace that will start in standby).
 pub fn resolve_goal_text(arg: Option<&str>, ws: &Path) -> String {

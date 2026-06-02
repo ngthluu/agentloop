@@ -66,3 +66,32 @@ fn planner_prompt_includes_pending_requests() {
     assert!(p.contains("add a --due flag"));
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn planner_prompt_maintains_design_and_build_graph() {
+    let ws = ws_with_state();
+    let p = planner::planner_prompt(&ws, 3);
+    // Planner owns the technical design now.
+    assert!(p.contains("design.md"), "planner is told to maintain design.md");
+    // Work items are all role=build; no architect/fix/trivial.
+    assert!(p.contains(r#"role="build""#), "items are tagged build");
+    assert!(!p.contains("architect"), "architect role removed");
+    assert!(!p.contains(r#"role="fix""#), "fix role removed");
+    assert!(!p.contains(r#"role="trivial""#), "trivial role removed");
+    // Dependency-aware decomposition is requested.
+    assert!(p.contains("dependency-aware"), "asks for a dependency-aware task graph");
+}
+
+#[test]
+fn worker_prompt_injects_design_when_present() {
+    let ws = std::env::temp_dir().join(format!("alwd-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
+    std::fs::write(ws.join(".agentloop/state/design.md"), "Use SQLite for storage.").unwrap();
+
+    let item = serde_json::json!({"id":"it-9","title":"T","desc":"D","role":"build","acceptance":"A"});
+    let p = agentloop::worker::worker_prompt(&ws, &item);
+    assert!(p.contains("TECHNICAL DESIGN"), "design block header present");
+    assert!(p.contains("Use SQLite for storage."), "design content injected");
+    let _ = std::fs::remove_dir_all(&ws);
+}

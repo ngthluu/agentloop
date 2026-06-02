@@ -4,10 +4,11 @@ Autonomous app builder. Give it one goal; it plans a backlog, spawns `claude`/`c
 workers in parallel git worktrees, integrates their work, runs a planner-authored
 `verify.sh` gate, and loops until the app works or a safety cap trips.
 
-When run in a terminal it shows a live TUI: a progress panel, an inbox for answering
-questions that agents raise, and an add-task prompt. When the goal is done it stays
-alive in standby so you can keep adding tasks. Piped/non-TTY runs fall back to plain
-event-line output and exit on completion.
+When run in a terminal it shows a live TUI: a goal-entry screen lets you confirm or
+edit the goal before anything runs, then a progress panel, an inbox for answering
+questions that agents raise, and a persistent input bar for adding tasks. When the
+goal is done it stays alive in standby so you can keep adding tasks. Piped/non-TTY
+runs fall back to plain event-line output and exit on completion.
 
 ## Requirements
 
@@ -22,14 +23,20 @@ cargo build --release
 ## Usage
 
 ```bash
-./target/release/agentloop "<goal>" --workspace ./app   # first run, with a goal
-./target/release/agentloop --workspace ./app             # resume an existing workspace
-./target/release/agentloop --workspace ./new-dir         # fresh dir: starts in standby; press [a] to add a task
+./target/release/agentloop "<goal>" --workspace ./app   # pre-fills goal-entry screen with <goal>
+./target/release/agentloop --workspace ./app             # resume: entry screen pre-filled from goal.md
+./target/release/agentloop --workspace ./new-dir         # fresh dir: entry screen is empty
 ```
 
-The goal argument is optional. When omitted, agentloop reads the goal from
-`<workspace>/.agentloop/state/goal.md` and resumes; if there is no prior goal it starts
-in standby waiting for you to add a task.
+Every interactive (terminal) launch opens on a **goal-entry screen** first. The screen
+is pre-filled with the existing goal from `<workspace>/.agentloop/state/goal.md`, or
+empty on a fresh workspace. Nothing runs — no planner, no workers — until you
+type/edit the goal and press `enter` (the "[ Continue ]" action). `Ctrl-C` at the
+entry screen quits without running. A goal passed as the CLI argument pre-fills the
+entry screen rather than starting immediately.
+
+Headless/piped (non-TTY) runs are unchanged: they use the goal arg or persisted goal
+and run directly without the entry screen.
 
 Options:
 
@@ -41,9 +48,13 @@ Options:
 ## How it works
 
 - **State:** `.agentloop/state/master.md` (human-readable status board) + `backlog.json`
-  (machine state). The planner rewrites both each iteration.
+  (machine state). The planner rewrites both each iteration. The planner also writes and
+  maintains `.agentloop/state/design.md` (the technical solution design); `build` workers
+  implement against `design.md`.
 - **Routing:** edit `.agentloop/config.yaml` to map each role to a tool/model/effort/flags.
-  The planner tags every backlog item with a role; the loop spawns it accordingly.
+  The available roles are `planner`, `build`, and `resolver`. The planner owns the
+  technical design and emits a dependency-aware backlog of `build` items; the loop
+  spawns each item according to its role.
 - **Gate:** the planner writes `.agentloop/verify.sh`; the loop runs it as the acceptance
   check. This is what lets agentloop target any kind of software.
 - **Caps:** `max_iterations`, `max_parallel`, `item_timeout_sec`, `total_budget_sec`,
@@ -71,15 +82,22 @@ Options:
 
 ## Interactive mode (TUI)
 
-Running in a terminal opens a full-screen panel. Keys:
+Running in a terminal opens a full-screen panel. A persistent, text-wrapping input bar
+sits at the bottom of the screen at all times (similar to Claude Code's input). Keys:
 
+- Printable keys always type into the persistent bottom input bar; it wraps long text
+  automatically. `shift+enter` (or `alt+enter`) inserts a newline.
+- `enter` — submits the input. When the Inbox pane is focused and a question is
+  selected, the input text is used as the answer to that question; otherwise the text
+  is added as a new task to the planner. A label above the input shows the current
+  target: "Answering \<id\>" or "Add task". When the input is empty, `enter` on the
+  Jobs pane opens the selected job's detail view (live log tail + a real-time working
+  timer).
 - `tab` — switch focus between the Jobs and Inbox panes (the focused pane is highlighted)
-- `↑`/`↓` — navigate the focused pane (jobs or the question inbox)
-- `enter` — on the Jobs pane: open the selected job's detail (live log tail + a real-time
-  working timer); on the Inbox: answer the selected question (type, `enter` submit, `esc` cancel)
-- `esc` — leave the job-detail view
-- `a` — add a task (type a natural-language request, `enter` to submit)
-- `q` — quit
+- `↑`/`↓` — navigate the focused pane (jobs or the question inbox), or scroll the log
+  in the job-detail view
+- `esc` — clear the input bar, or leave the job-detail view
+- `q` — quit (only when the input bar is empty); `Ctrl-C` always quits
 
 The status bar shows the goal, current iteration, gate state, open-item count, a
 pending-questions counter, and a live `⏱` total-run-time readout; `✓ DONE · standby`

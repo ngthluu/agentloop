@@ -7,11 +7,8 @@ caps:
   max_attempts: 3
 
 routing:                      # role -> how to spawn
-  planner:   { tool: claude, model: opus,   effort: high,   flags: "--dangerously-skip-permissions" }
-  architect: { tool: claude, model: opus,   effort: high,   flags: "--dangerously-skip-permissions" }
-  build:     { tool: codex,  model: gpt-5.5, effort: high,   flags: "--dangerously-bypass-approvals-and-sandbox" }
-  fix:       { tool: claude, model: sonnet, effort: medium, flags: "--dangerously-skip-permissions" }
-  trivial:   { tool: claude, model: haiku,  effort: low,    flags: "--dangerously-skip-permissions" }
-  resolver:  { tool: claude, model: sonnet, effort: medium, flags: "--dangerously-skip-permissions" }
+  planner:  { tool: claude, model: opus,   effort: high,   flags: "--dangerously-skip-permissions" }
+  build:    { tool: codex,  model: gpt-5.5, effort: high,   flags: "--dangerously-bypass-approvals-and-sandbox" }
+  resolver: { tool: claude, model: sonnet, effort: medium, flags: "--dangerously-skip-permissions" }
 
 defaults: { role: build }

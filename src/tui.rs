@@ -28,13 +28,6 @@ pub struct Pending {
     pub context: String,
 }
 
-#[derive(PartialEq)]
-enum Mode {
-    Normal,
-    Answering,
-    AddingTask,
-}
-
 #[derive(PartialEq, Clone, Copy)]
 enum Focus {
     Jobs,
@@ -43,6 +36,7 @@ enum Focus {
 
 #[derive(PartialEq, Clone, Copy)]
 enum View {
+    GoalEntry,
     List,
     JobDetail,
 }
@@ -56,10 +50,10 @@ pub struct AppState {
     pub gate: String,
     pub open: i64,
     pub standby: bool,
-    mode: Mode,
     input: String,
     focus: Focus,
     view: View,
+    goal_focus_continue: bool,
     selected_job: usize,
     log_scroll: u16,
     started: std::time::Instant,
@@ -68,7 +62,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(goal: String) -> Self {
         Self {
-            goal,
+            goal: goal.clone(),
             jobs: vec![],
             inbox: vec![],
             selected: 0,
@@ -76,10 +70,10 @@ impl AppState {
             gate: "init".into(),
             open: 0,
             standby: false,
-            mode: Mode::Normal,
-            input: String::new(),
+            input: goal,
             focus: Focus::Inbox,
-            view: View::List,
+            view: View::GoalEntry,
+            goal_focus_continue: false,
             selected_job: 0,
             log_scroll: 0,
             started: std::time::Instant::now(),
@@ -139,153 +133,179 @@ impl AppState {
 
     /// Map a key to an optional Command. Returns None when the key only changes UI state.
     pub fn on_key(&mut self, k: KeyEvent) -> Option<Command> {
-        match self.mode {
-            Mode::Normal => {
-                // Detail view has its own keys.
-                if self.view == View::JobDetail {
-                    // Tab / 'a' / Enter are intentionally inert in detail view.
-                    match k.code {
-                        KeyCode::Esc => {
-                            self.view = View::List;
-                            self.log_scroll = 0;
-                        }
-                        KeyCode::Up => {
-                            self.log_scroll = self.log_scroll.saturating_add(1);
-                        }
-                        KeyCode::Down => {
-                            self.log_scroll = self.log_scroll.saturating_sub(1);
-                        }
-                        KeyCode::Char('q') => return Some(Command::Quit),
-                        _ => {}
-                    }
-                    return None;
+        match self.view {
+            View::GoalEntry => self.on_key_goal_entry(k),
+            View::JobDetail => self.on_key_job_detail(k),
+            View::List => self.on_key_list(k),
+        }
+    }
+
+    fn is_newline(k: &KeyEvent) -> bool {
+        k.code == KeyCode::Enter
+            && k.modifiers.intersects(crossterm::event::KeyModifiers::SHIFT | crossterm::event::KeyModifiers::ALT)
+    }
+
+    fn on_key_goal_entry(&mut self, k: KeyEvent) -> Option<Command> {
+        if Self::is_newline(&k) {
+            self.input.push('\n');
+            return None;
+        }
+        match k.code {
+            KeyCode::Enter => {
+                let goal = self.input.trim().to_string();
+                if goal.is_empty() {
+                    return None; // nothing to start yet; stay on the entry screen
                 }
-                match k.code {
-                    KeyCode::Char('q') => Some(Command::Quit),
-                    KeyCode::Char('a') => {
-                        self.mode = Mode::AddingTask;
-                        self.input.clear();
-                        None
-                    }
-                    KeyCode::Tab => {
-                        self.focus = match self.focus {
-                            Focus::Jobs => Focus::Inbox,
-                            Focus::Inbox => Focus::Jobs,
-                        };
-                        None
-                    }
-                    KeyCode::Up => {
-                        match self.focus {
-                            Focus::Jobs => {
-                                if self.selected_job > 0 {
-                                    self.selected_job -= 1;
-                                }
-                            }
-                            Focus::Inbox => {
-                                if self.selected > 0 {
-                                    self.selected -= 1;
-                                }
-                            }
+                self.goal = goal.clone();
+                self.input.clear();
+                self.view = View::List;
+                Some(Command::StartRun { goal })
+            }
+            KeyCode::Tab => {
+                self.goal_focus_continue = !self.goal_focus_continue;
+                None
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+                None
+            }
+            KeyCode::Esc => {
+                self.input.clear();
+                None
+            }
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn on_key_job_detail(&mut self, k: KeyEvent) -> Option<Command> {
+        if Self::is_newline(&k) {
+            self.input.push('\n');
+            return None;
+        }
+        match k.code {
+            KeyCode::Esc => {
+                self.view = View::List;
+                self.log_scroll = 0;
+                None
+            }
+            KeyCode::Up => {
+                self.log_scroll = self.log_scroll.saturating_add(1);
+                None
+            }
+            KeyCode::Down => {
+                self.log_scroll = self.log_scroll.saturating_sub(1);
+                None
+            }
+            KeyCode::Enter => self.submit(),
+            KeyCode::Backspace => {
+                self.input.pop();
+                None
+            }
+            KeyCode::Char('q') if self.input.trim().is_empty() => Some(Command::Quit),
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn on_key_list(&mut self, k: KeyEvent) -> Option<Command> {
+        if Self::is_newline(&k) {
+            self.input.push('\n');
+            return None;
+        }
+        match k.code {
+            KeyCode::Tab => {
+                self.focus = match self.focus {
+                    Focus::Jobs => Focus::Inbox,
+                    Focus::Inbox => Focus::Jobs,
+                };
+                None
+            }
+            KeyCode::Up => {
+                match self.focus {
+                    Focus::Jobs => {
+                        if self.selected_job > 0 {
+                            self.selected_job -= 1;
                         }
-                        None
                     }
-                    KeyCode::Down => {
-                        match self.focus {
-                            Focus::Jobs => {
-                                if self.selected_job + 1 < self.jobs.len() {
-                                    self.selected_job += 1;
-                                }
-                            }
-                            Focus::Inbox => {
-                                if self.selected + 1 < self.inbox.len() {
-                                    self.selected += 1;
-                                }
-                            }
+                    Focus::Inbox => {
+                        if self.selected > 0 {
+                            self.selected -= 1;
                         }
-                        None
                     }
-                    KeyCode::Enter => {
-                        match self.focus {
-                            Focus::Jobs => {
-                                if self.selected_job < self.jobs.len() {
-                                    self.view = View::JobDetail;
-                                    self.log_scroll = 0;
-                                }
-                            }
-                            Focus::Inbox => {
-                                if !self.inbox.is_empty() {
-                                    self.mode = Mode::Answering;
-                                    self.input.clear();
-                                }
-                            }
+                }
+                None
+            }
+            KeyCode::Down => {
+                match self.focus {
+                    Focus::Jobs => {
+                        if self.selected_job + 1 < self.jobs.len() {
+                            self.selected_job += 1;
                         }
-                        None
                     }
-                    _ => None,
+                    Focus::Inbox => {
+                        if self.selected + 1 < self.inbox.len() {
+                            self.selected += 1;
+                        }
+                    }
+                }
+                None
+            }
+            KeyCode::Enter => {
+                // Non-empty input submits; empty input runs the focused pane's action.
+                if self.input.trim().is_empty() {
+                    if self.focus == Focus::Jobs && self.selected_job < self.jobs.len() {
+                        self.view = View::JobDetail;
+                        self.log_scroll = 0;
+                    }
+                    None
+                } else {
+                    self.submit()
                 }
             }
-            Mode::Answering => match k.code {
-                KeyCode::Esc => {
-                    self.mode = Mode::Normal;
-                    self.input.clear();
-                    None
-                }
-                KeyCode::Backspace => {
-                    self.input.pop();
-                    None
-                }
-                KeyCode::Char(c) => {
-                    self.input.push(c);
-                    None
-                }
-                KeyCode::Enter => {
-                    let idx = self.selected.min(self.inbox.len().saturating_sub(1));
-                    let p = self.inbox.remove(idx);
-                    let text = std::mem::take(&mut self.input);
-                    self.selected = 0;
-                    self.mode = Mode::Normal;
-                    Some(Command::AnswerQuestion { item_id: p.item_id, text })
-                }
-                _ => None,
-            },
-            Mode::AddingTask => match k.code {
-                KeyCode::Esc => {
-                    self.mode = Mode::Normal;
-                    self.input.clear();
-                    None
-                }
-                KeyCode::Backspace => {
-                    self.input.pop();
-                    None
-                }
-                KeyCode::Char(c) => {
-                    self.input.push(c);
-                    None
-                }
-                KeyCode::Enter => {
-                    let text = std::mem::take(&mut self.input);
-                    self.mode = Mode::Normal;
-                    Some(Command::AddTask { request: text })
-                }
-                _ => None,
-            },
+            KeyCode::Backspace => {
+                self.input.pop();
+                None
+            }
+            KeyCode::Esc => {
+                self.input.clear();
+                None
+            }
+            KeyCode::Char('q') if self.input.trim().is_empty() => Some(Command::Quit),
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Submit the current input, routing by focus/selection. Clears the input.
+    fn submit(&mut self) -> Option<Command> {
+        let text = self.input.trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        if self.focus == Focus::Inbox && !self.inbox.is_empty() {
+            let idx = self.selected.min(self.inbox.len().saturating_sub(1));
+            let p = self.inbox.remove(idx);
+            self.selected = 0;
+            self.input.clear();
+            Some(Command::AnswerQuestion { item_id: p.item_id, text })
+        } else {
+            self.input.clear();
+            Some(Command::AddTask { request: text })
         }
     }
 
     pub fn input_buffer(&self) -> &str {
         &self.input
-    }
-
-    pub fn is_editing(&self) -> bool {
-        self.mode != Mode::Normal
-    }
-
-    pub fn mode_is_adding(&self) -> bool {
-        self.mode == Mode::AddingTask
-    }
-
-    pub fn mode_is_answering(&self) -> bool {
-        self.mode == Mode::Answering
     }
 
     pub fn focus_is_jobs(&self) -> bool {
@@ -294,6 +314,24 @@ impl AppState {
 
     pub fn in_job_detail(&self) -> bool {
         self.view == View::JobDetail
+    }
+
+    pub fn in_goal_entry(&self) -> bool {
+        self.view == View::GoalEntry
+    }
+
+    pub fn goal_continue_focused(&self) -> bool {
+        self.goal_focus_continue
+    }
+
+    /// Label shown above the input: what a submission will do right now.
+    pub fn input_target_label(&self) -> String {
+        if self.focus == Focus::Inbox && !self.inbox.is_empty() {
+            let idx = self.selected.min(self.inbox.len().saturating_sub(1));
+            format!("Answering {}", self.inbox[idx].item_id)
+        } else {
+            "Add task".to_string()
+        }
     }
 
     /// Wall-clock time since the session (TUI) started.
@@ -365,12 +403,18 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
     use ratatui::layout::{Constraint, Direction, Layout};
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::Line;
-    use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+    use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
     let area = f.area();
 
-    // Top status bar (1 line), main content, footer (3 lines)
-    let footer_height = if s.is_editing() { 4 } else { 3 };
+    if s.in_goal_entry() {
+        render_goal_entry(f, s, area);
+        return;
+    }
+
+    // Bottom input bar height grows with the number of input lines (capped).
+    let input_lines = s.input_buffer().split('\n').count().max(1) as u16;
+    let footer_height = (input_lines + 3).min(12); // label + input lines + hint + border
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -406,7 +450,6 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(chunks[1]);
 
-        // Jobs list
         let job_items: Vec<ListItem> = s
             .jobs
             .iter()
@@ -432,7 +475,6 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         );
         f.render_widget(jobs_list, main_chunks[0]);
 
-        // Inbox list
         let inbox_items: Vec<ListItem> = s
             .inbox
             .iter()
@@ -456,57 +498,77 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         f.render_widget(inbox_list, main_chunks[1]);
     }
 
-    // --- Footer ---
-    let footer_widget = if s.is_editing() {
-        // Editing mode: show context + input
-        let label = if s.mode_is_answering() {
-            let p = s.inbox.get(s.selected);
-            match p {
-                Some(pending) => format!(
-                    " answering {} — {}",
-                    pending.item_id, pending.text
-                ),
-                None => " answering".to_string(),
-            }
-        } else {
-            " add task (sent to planner):".to_string()
-        };
-        let input_line = format!(" > {}", s.input_buffer());
-        let hint = " [enter] submit  [esc] cancel";
-        Paragraph::new(vec![
-            Line::from(label),
-            Line::from(input_line),
-            Line::from(hint),
-        ])
+    // --- Persistent bottom input bar ---
+    let footer = chunks[2];
+    let fchunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(footer);
+
+    let title = format!(" {} ", s.input_target_label());
+    let input = Paragraph::new(s.input_buffer())
+        .wrap(Wrap { trim: false })
         .block(
             Block::default()
-                .borders(Borders::TOP)
+                .title(title)
+                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(Color::Yellow)),
         )
-        .style(Style::default().fg(Color::Yellow))
-    } else if s.standby {
-        Paragraph::new(vec![
-            Line::from(" ✓ DONE · standby — waiting for new input"),
-            Line::from(" [a] add task  [q] quit"),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(Color::Green)),
-        )
-        .style(Style::default().fg(Color::Green))
+        .style(Style::default().fg(Color::White));
+    f.render_widget(input, fchunks[0]);
+
+    let hint = if s.standby {
+        " ✓ standby · [enter] submit  [shift+enter] newline  [tab] pane  [↑↓] nav  [esc] clear  [q] quit"
     } else {
-        Paragraph::new(Line::from(
-            " [tab] switch pane  [\u{2191}\u{2193}] navigate  [enter] open/answer  [a] add task  [q] quit",
-        ))
+        " [enter] submit  [shift+enter] newline  [tab] pane  [↑↓] nav  [esc] clear  [q] quit"
+    };
+    let hint_para = Paragraph::new(Line::from(hint))
+        .style(Style::default().fg(Color::DarkGray));
+    f.render_widget(hint_para, fchunks[1]);
+}
+
+fn render_goal_entry(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout::Rect) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::Line;
+    use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    let title = Paragraph::new(Line::from(
+        " Describe what to build — or edit the goal below, then Continue:",
+    ))
+    .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    f.render_widget(title, chunks[1]);
+
+    let input = Paragraph::new(s.input_buffer())
+        .wrap(Wrap { trim: false })
         .block(
             Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        )
-        .style(Style::default().fg(Color::DarkGray))
+                .title(" Goal ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+    f.render_widget(input, chunks[2]);
+
+    let button_style = if s.goal_continue_focused() {
+        Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
     };
-    f.render_widget(footer_widget, chunks[2]);
+    let button = Paragraph::new(Line::from("  [ Continue ]   ([enter] start  ·  [shift+enter] newline  ·  [ctrl-c] quit)"))
+        .style(button_style)
+        .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::DarkGray)));
+    f.render_widget(button, chunks[3]);
 }
 
 fn render_job_detail(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout::Rect) {
