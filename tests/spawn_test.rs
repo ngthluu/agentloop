@@ -1,13 +1,15 @@
 use agentloop::config::Config;
 use agentloop::spawn;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::LazyLock;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 /// Mutex to serialize tests that mutate process-global env vars (FAKE_AGENT etc.).
 /// Without this, parallel test threads can observe each other's env mutations and
-/// race on FAKE_SLEEP in particular.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+/// race on FAKE_SLEEP in particular. An async-aware Mutex is used because the guard
+/// is held across `.await` points (the spawn reads the env it set).
+static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn cfg() -> Config {
     serde_yaml::from_str(r#"
@@ -43,7 +45,7 @@ fn unknown_tool_errors() {
 #[tokio::test]
 async fn fake_agent_runs_and_logs_argv() {
     let bin = env!("CARGO_BIN_EXE_fake_agent");
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().await;
     std::env::set_var("FAKE_AGENT", "1");
     std::env::set_var("FAKE_AGENT_BIN", bin);
     std::env::remove_var("FAKE_SLEEP");
@@ -66,7 +68,7 @@ async fn fake_agent_runs_and_logs_argv() {
 #[tokio::test]
 async fn timeout_returns_124() {
     let bin = env!("CARGO_BIN_EXE_fake_agent");
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().await;
     std::env::set_var("FAKE_AGENT", "1");
     std::env::set_var("FAKE_AGENT_BIN", bin);
     std::env::set_var("FAKE_SLEEP", "10");
