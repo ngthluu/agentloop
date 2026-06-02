@@ -56,7 +56,7 @@ impl AppState {
 
     pub fn apply(&mut self, ev: Event) {
         match ev {
-            Event::JobDispatched { id, label, tool, model } => {
+            Event::JobDispatched { id, label, tool, model, log_path: _ } => {
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
                     j.label = label;
                     j.tool = tool;

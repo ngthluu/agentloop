@@ -51,7 +51,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     let prole = cfg.resolve_role("planner").unwrap_or_default();
     let ptool = cfg.role_field(&prole, "tool").unwrap_or_default();
     let pmodel = cfg.role_field(&prole, "model").unwrap_or_default();
-    reporter.dispatch("planner", "planning", &ptool, &pmodel);
+    reporter.dispatch("planner", "planning", &ptool, &pmodel, Some(&ldir.join("planner.log")));
     let ok = planner::planner_run(cfg, ws, &ldir.join("planner.log"), itimeout).await?;
     if !ok {
         eprintln!("planner failed/invalid");
@@ -101,11 +101,11 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         let tool = cfg.role_field(&rrole, "tool").unwrap_or_default();
         let model = cfg.role_field(&rrole, "model").unwrap_or_default();
         let label = item["title"].as_str().unwrap_or("").to_string();
-        reporter.dispatch(&id, &label, &tool, &model);
+        let log = ldir.join(format!("item-{id}.log"));
+        reporter.dispatch(&id, &label, &tool, &model, Some(&log));
 
         let cfg2 = cfg.clone();
         let ws2 = ws.to_path_buf();
-        let log = ldir.join(format!("item-{id}.log"));
         let item2: Value = item.clone();
         let id2 = id.clone();
         handles.push(tokio::spawn(async move {

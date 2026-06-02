@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[test]
 fn applies_events_to_view_model() {
     let mut s = AppState::new("build a todo app".into());
-    s.apply(Event::JobDispatched { id: "it-1".into(), label: "scaffold".into(), tool: "codex".into(), model: "gpt-5".into() });
+    s.apply(Event::JobDispatched { id: "it-1".into(), label: "scaffold".into(), tool: "codex".into(), model: "gpt-5".into(), log_path: None });
     s.apply(Event::QuestionRaised { item_id: "db".into(), label: "db-schema".into(), text: "SQLite or Postgres?".into(), context: "storage".into() });
     assert_eq!(s.jobs.len(), 1);
     assert_eq!(s.inbox.len(), 1);
