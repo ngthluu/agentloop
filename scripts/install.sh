@@ -28,6 +28,7 @@ detect_target() {
     Linux)
       case "$arch" in
         x86_64|amd64) echo "x86_64-unknown-linux-gnu" ;;
+        # linux/arm64 (aarch64) not yet supported — no release artifact built
         *)            return 1 ;;
       esac
       ;;
@@ -49,7 +50,8 @@ main() {
   printf 'Installing %s (%s) to %s\n' "$BIN" "$target" "$install_dir"
 
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  # shellcheck disable=SC2064  # intentional: expand $tmp now so trap fires even after main() returns
+  trap "rm -rf '$tmp'" EXIT
 
   curl -fsSL "$url" -o "$tmp/${BIN}.tar.gz" || err "download failed: $url"
   tar -xzf "$tmp/${BIN}.tar.gz" -C "$tmp" || err "extract failed"

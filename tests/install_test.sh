@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=../scripts/install.sh
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/scripts/install.sh"
+set +e   # install.sh enabled errexit on source; the test accumulates failures instead
 
 fail=0
 
