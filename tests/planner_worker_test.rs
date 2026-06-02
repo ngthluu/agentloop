@@ -76,6 +76,8 @@ fn planner_prompt_maintains_design_and_build_graph() {
     // Work items are all role=build; no architect/fix/trivial.
     assert!(p.contains(r#"role="build""#), "items are tagged build");
     assert!(!p.contains("architect"), "architect role removed");
+    assert!(!p.contains(r#"role="fix""#), "fix role removed");
+    assert!(!p.contains(r#"role="trivial""#), "trivial role removed");
     // Dependency-aware decomposition is requested.
     assert!(p.contains("dependency-aware"), "asks for a dependency-aware task graph");
 }
