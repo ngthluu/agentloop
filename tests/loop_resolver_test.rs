@@ -98,6 +98,11 @@ defaults: { role: build }
         0,
         "no open items remain"
     );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("shared.txt")).unwrap().trim(),
+        "resolved",
+        "the resolver's resolution landed on main (not a clean retry)"
+    );
 
     std::env::remove_var("FAKE_AGENT");
     std::env::remove_var("FAKE_AGENT_BIN");

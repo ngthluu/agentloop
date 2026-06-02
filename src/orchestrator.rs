@@ -24,6 +24,7 @@ async fn resolve_conflict(
     id: &str,
     label: &str,
     item: &Value,
+    branch: &str,
     n: u32,
     reporter: &Arc<dyn Reporter>,
 ) -> Result<bool> {
@@ -36,7 +37,9 @@ async fn resolve_conflict(
 
     let prompt = worker::resolver_prompt(ws, item);
     // Unbounded: run in the main workspace with no effective timeout.
-    let _ = spawn::agent_run(cfg, "resolver", &prompt, ws, &log, NO_TIMEOUT).await;
+    if let Err(e) = spawn::agent_run(cfg, "resolver", &prompt, ws, &log, NO_TIMEOUT).await {
+        eprintln!("resolver spawn error for {id}: {e:#}");
+    }
 
     // Resolved iff no unmerged paths remain. If the agent resolved+staged but didn't
     // commit, finish the merge ourselves.
@@ -45,6 +48,12 @@ async fn resolve_conflict(
         return Ok(false);
     }
     if worktree::merge_in_progress(ws) && !worktree::commit_merge(ws) {
+        reporter.status(&rid, "failed", &tool, &model);
+        return Ok(false);
+    }
+    // Guard against a resolver that aborted instead of completing the merge: the
+    // branch's commits must now be contained in HEAD.
+    if worktree::has_commits_ahead(ws, branch) {
         reporter.status(&rid, "failed", &tool, &model);
         return Ok(false);
     }
@@ -214,17 +223,18 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                         merged += 1;
                     }
                     MergeOutcome::Conflict => {
-                        let label = state::read(&bk)
+                        let (label, item_v) = state::read(&bk)
                             .ok()
-                            .as_ref()
-                            .and_then(|v| state::item(v, id))
-                            .and_then(|i| i["title"].as_str().map(String::from))
+                            .map(|v| {
+                                let it = state::item(&v, id).cloned();
+                                let label = it
+                                    .as_ref()
+                                    .and_then(|i| i["title"].as_str().map(String::from))
+                                    .unwrap_or_default();
+                                (label, it.unwrap_or(Value::Null))
+                            })
                             .unwrap_or_default();
-                        let item_v = state::read(&bk)
-                            .ok()
-                            .and_then(|v| state::item(&v, id).cloned())
-                            .unwrap_or(Value::Null);
-                        if resolve_conflict(cfg, ws, id, &label, &item_v, n, reporter).await? {
+                        if resolve_conflict(cfg, ws, id, &label, &item_v, &branch, n, reporter).await? {
                             state::set_status(&bk, id, "done", "")?;
                             reporter.status(id, "merged", "", "");
                             merged += 1;
