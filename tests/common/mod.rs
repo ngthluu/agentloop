@@ -67,6 +67,55 @@ exit 0
     ws
 }
 
+/// Planner: round 1 seeds it-1 + a verify.sh that requires it-1.txt (and it-2.txt when
+/// WANT2 is set). Later rounds mark done items done AND, if a pending request exists,
+/// add it-2 (ready). Worker: makes <id>.txt + commits + writes result.
+#[allow(dead_code)]
+pub fn init_ws_with_request_stub() -> PathBuf {
+    let ws = init_ws_with_stub();
+    let stub = r##"#!/bin/bash
+tool="$1"; shift
+ws="$WS"; ws_state="$ws/.agentloop/state"; res="$ws/.agentloop/results"
+prompt="$*"
+case "$prompt" in
+  *PLANNER*)
+    python3 - "$ws" <<'PY'
+import json,sys,os
+ws=sys.argv[1]; st=os.path.join(ws,'.agentloop','state'); res=os.path.join(ws,'.agentloop','results')
+bkp=os.path.join(st,'backlog.json'); d=json.load(open(bkp))
+def ensure(idn,acc):
+    if not any(i['id']==idn for i in d['items']):
+        d['items'].append({"id":idn,"title":idn,"desc":"d","role":"build","deps":[],"status":"ready","attempts":0,"acceptance":acc})
+if not d['items']:
+    ensure('it-1','it-1 file')
+    open(os.path.join(ws,'.agentloop','verify.sh'),'w').write('#!/bin/bash\n[ -f "$PWD/it-1.txt" ] && { [ -z "$WANT2" ] || [ -f "$PWD/it-2.txt" ]; }\n')
+    os.chmod(os.path.join(ws,'.agentloop','verify.sh'),0o755)
+for i in d['items']:
+    if os.path.exists(os.path.join(res,i['id']+'.json')): i['status']='done'
+reqp=os.path.join(st,'requests.jsonl')
+pend=[l for l in open(reqp).read().splitlines() if l.strip() and json.loads(l)['status']=='pending'] if os.path.exists(reqp) else []
+if pend:
+    ensure('it-2','it-2 file')
+json.dump(d,open(bkp,'w'))
+open(os.path.join(st,'master.md'),'w').write('# updated')
+PY
+    ;;
+  *WORKER*)
+    id=$(echo "$prompt" | sed -n 's/.*id:    \([a-z0-9-]*\).*/\1/p' | head -1)
+    [ -z "$id" ] && id=it-1
+    echo made > "$PWD/$id.txt"; git add -A; git commit -qm "worker $id" 2>/dev/null
+    echo "{\"status\":\"done\",\"summary\":\"made $id\",\"files_changed\":[\"$id.txt\"]}" > "$res/$id.json"
+    ;;
+esac
+exit 0
+"##;
+    std::fs::write(ws.join("stub.sh"), stub).unwrap();
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(ws.join("stub.sh"), std::fs::Permissions::from_mode(0o755)).unwrap(); }
+    std::fs::write(ws.join(".agentloop/state/goal.md"), "make it-1").unwrap();
+    ws
+}
+
 /// Stub that, as worker, asks a question the FIRST time (needs_input) and completes
 /// the SECOND time (after an answer file exists). Planner seeds one item; marks done
 /// when a done result is present.

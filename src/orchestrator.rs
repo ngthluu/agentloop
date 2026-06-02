@@ -254,9 +254,9 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
     Ok(1)
 }
 
-/// Interactive driver: like `run`, but answers/quit arrive via `crx`. When only
-/// blocked items remain, it blocks for a command instead of stopping. Returns 0 on
-/// DONE, 1 on cap/stall, Err on hard error.
+/// Interactive driver with a standby state machine. DONE/cap/stall transitions to
+/// standby (idle, awaiting a command) instead of exiting. AddTask / AnswerQuestion
+/// re-engage with a fresh budget window; Quit exits. Tasks can also be added mid-run.
 pub async fn run_interactive(
     cfg: &Config,
     ws: &Path,
@@ -266,55 +266,72 @@ pub async fn run_interactive(
     let bk = ws.join(".agentloop/state/backlog.json");
     let maxit = cfg.max_iterations();
     let budget = Duration::from_secs(cfg.total_budget_sec());
-    let start = Instant::now();
-    let (mut n, mut stalls) = (0u32, 0u32);
+
+    let mut n = 0u32;
+    let mut stalls = 0u32;
     let mut prev_gate = String::from("init");
+    let mut window_start = Instant::now();   // budget window; reset on re-engage
+    let mut iters_this_window = 0u32;        // max_iterations is per-engagement
 
-    while n < maxit {
-        n += 1;
-        if start.elapsed() >= budget {
-            eprintln!("STOP: time budget exceeded");
-            return Ok(1);
-        }
+    'outer: loop {
+        // --- WORKING phase ---
+        let go_standby = 'working: loop {
+            // Drain any queued commands without blocking (mid-run answers/add-task/quit).
+            while let Ok(cmd) = crx.try_recv() {
+                match cmd {
+                    Command::Quit => return Ok(0),
+                    Command::AnswerQuestion { item_id, text } => { let _ = apply_answer(ws, &item_id, &text); }
+                    Command::AddTask { request } => { let _ = crate::requests::append(ws, &request); }
+                }
+            }
 
-        let merged = iterate(cfg, ws, n, &reporter).await?;
+            if iters_this_window >= maxit { eprintln!("STOP(window): max_iterations"); break 'working true; }
+            if window_start.elapsed() >= budget { eprintln!("STOP(window): budget"); break 'working true; }
 
-        let grc = gate(ws);
-        let gate_state = if grc == 0 { "pass" } else { "fail" };
-        let open = state::open_count(&bk)?;
-        reporter.iteration(n, merged, gate_state, open);
+            n += 1;
+            iters_this_window += 1;
+            let merged = iterate(cfg, ws, n, &reporter).await?;
+            let grc = gate(ws);
+            let gate_state = if grc == 0 { "pass" } else { "fail" };
+            let open = state::open_count(&bk)?;
+            let blocked = state::blocked_count(&bk)?;
+            reporter.iteration(n, merged, gate_state, open);
 
-        if gate_state == "pass" && open == 0 {
-            eprintln!("DONE");
-            return Ok(0);
-        }
+            if gate_state == "pass" && open == 0 { break 'working true; }
 
-        let blocked = state::blocked_count(&bk)?;
-        // Only blocked work remains: wait for the user to answer (or quit).
-        if open > 0 && open == blocked {
+            // Only blocked work remains: block for a command (answer/add-task/quit).
+            if open > 0 && open == blocked {
+                match crx.recv().await {
+                    None | Some(Command::Quit) => return Ok(0),
+                    Some(Command::AnswerQuestion { item_id, text }) => { let _ = apply_answer(ws, &item_id, &text); }
+                    Some(Command::AddTask { request }) => { let _ = crate::requests::append(ws, &request); }
+                }
+                stalls = 0;
+                prev_gate = gate_state.to_string();
+                continue 'working;
+            }
+
+            if merged == 0 && gate_state == prev_gate {
+                stalls += 1;
+                if stalls >= 2 { eprintln!("STOP: no progress (stall)"); break 'working true; }
+            } else { stalls = 0; }
+            prev_gate = gate_state.to_string();
+        };
+
+        // --- STANDBY phase ---
+        if go_standby {
+            reporter.standby();
             match crx.recv().await {
                 None | Some(Command::Quit) => return Ok(0),
-                Some(Command::AnswerQuestion { item_id, text }) => {
-                    let _ = apply_answer(ws, &item_id, &text);
-                }
-                Some(Command::AddTask { .. }) => { /* Phase 3 */ }
+                Some(Command::AnswerQuestion { item_id, text }) => { let _ = apply_answer(ws, &item_id, &text); }
+                Some(Command::AddTask { request }) => { let _ = crate::requests::append(ws, &request); }
             }
+            // Re-engage: fresh budget window + iteration allowance, reset stall.
+            window_start = Instant::now();
+            iters_this_window = 0;
             stalls = 0;
-            prev_gate = gate_state.to_string();
-            continue;
+            prev_gate = "init".into();
         }
-
-        if merged == 0 && gate_state == prev_gate {
-            stalls += 1;
-            if stalls >= 2 {
-                eprintln!("STOP: no progress for 2 stalls (3 consecutive iterations)");
-                return Ok(1);
-            }
-        } else {
-            stalls = 0;
-        }
-        prev_gate = gate_state.to_string();
+        continue 'outer;
     }
-    eprintln!("STOP: max_iterations reached");
-    Ok(1)
 }
