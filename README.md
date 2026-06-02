@@ -22,8 +22,14 @@ cargo build --release
 ## Usage
 
 ```bash
-./target/release/agentloop "<goal>" --workspace ./app
+./target/release/agentloop "<goal>" --workspace ./app   # first run, with a goal
+./target/release/agentloop --workspace ./app             # resume an existing workspace
+./target/release/agentloop --workspace ./new-dir         # fresh dir: starts in standby; press [a] to add a task
 ```
+
+The goal argument is optional. When omitted, agentloop reads the goal from
+`<workspace>/.agentloop/state/goal.md` and resumes; if there is no prior goal it starts
+in standby waiting for you to add a task.
 
 Options:
 
@@ -43,8 +49,12 @@ Options:
 - **Caps:** `max_iterations`, `max_parallel`, `item_timeout_sec`, `total_budget_sec`,
   `max_attempts`. The loop also stops on a no-progress stall.
 - **Parallelism:** independent ready items run concurrently, each in its own git worktree;
-  successful workers are merged back sequentially (conflicts bounce the item back to the
-  planner — never auto-resolved).
+  successful workers are merged back sequentially.
+- **Merge conflicts:** when a worker's branch conflicts on merge, agentloop spawns a
+  dedicated **resolver** agent (config role `resolver`) in the workspace to resolve the
+  conflict and complete the merge, instead of bouncing the item. The resolver is unbounded
+  (no attempt cap, no timeout) but is killed when you quit, so it never orphans. If it
+  cannot resolve, the merge is aborted and the item bounces back to the planner.
 - **Question inbox:** a worker that needs a decision only you can make writes
   `.agentloop/questions/<id>.json` and reports `status:"needs_input"`. The item is parked
   as `blocked` and surfaced in the TUI inbox. Your answer is stored in
@@ -71,8 +81,12 @@ Running in a terminal opens a full-screen panel. Keys:
 - `a` — add a task (type a natural-language request, `enter` to submit)
 - `q` — quit
 
-The status bar shows the goal, current iteration, gate state, open-item count, and a
-pending-questions counter; `✓ DONE · standby` appears when the run is idle and waiting.
+The status bar shows the goal, current iteration, gate state, open-item count, a
+pending-questions counter, and a live `⏱` total-run-time readout; `✓ DONE · standby`
+appears when the run is idle and waiting. (Headless runs print the total elapsed time on
+exit.)
+
+The main panel stacks the Jobs pane on top and the Inbox pane below (full width each).
 
 ## Layout
 
