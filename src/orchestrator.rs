@@ -108,15 +108,20 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         let item2: Value = item.clone();
         let id2 = id.clone();
         handles.push(tokio::spawn(async move {
-            let _ = worker::worker_dispatch(&cfg2, &ws2, &item2, &wt, &log, itimeout).await;
+            if let Err(e) = worker::worker_dispatch(&cfg2, &ws2, &item2, &wt, &log, itimeout).await {
+                eprintln!("worker {id2} dispatch error: {e:#}");
+            }
             id2
         }));
         dispatched.push(id);
     }
 
-    // Await all workers.
+    // Await all workers. A panicked worker task surfaces here; its missing result
+    // file then bounces the item back to ready during integration.
     for h in handles {
-        let _ = h.await;
+        if let Err(e) = h.await {
+            eprintln!("worker task panicked: {e}");
+        }
     }
 
     // Integrate sequentially based on each worker's result file.
