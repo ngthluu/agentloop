@@ -197,6 +197,40 @@ pub fn fmt_elapsed(d: std::time::Duration) -> String {
     }
 }
 
+/// Last `max_lines` lines of `path` (reading at most the final `max_bytes`),
+/// for the job-detail log view. Returns a single "(no output yet)" line when the
+/// file is missing or empty.
+pub fn tail_file(path: &std::path::Path, max_lines: usize, max_bytes: u64) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let placeholder = || vec!["(no output yet)".to_string()];
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return placeholder(),
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if len == 0 {
+        return placeholder();
+    }
+    let start = len.saturating_sub(max_bytes);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return placeholder();
+    }
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return placeholder();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    if lines.len() > max_lines {
+        lines = lines.split_off(lines.len() - max_lines);
+    }
+    if lines.is_empty() {
+        placeholder()
+    } else {
+        lines
+    }
+}
+
 fn status_glyph(status: &str) -> &'static str {
     match status {
         "running" => "●",
