@@ -3,9 +3,10 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::events::Reporter;
+use crate::events::{Command, Reporter};
 use crate::{planner, state, worker, worktree};
 
 /// Run verify.sh; capture output to last_gate.txt; return its exit code (1 if absent).
@@ -236,6 +237,71 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
         if open > 0 && open == blocked {
             eprintln!("STOP: blocked on user input (headless)");
             return Ok(1);
+        }
+
+        if merged == 0 && gate_state == prev_gate {
+            stalls += 1;
+            if stalls >= 2 {
+                eprintln!("STOP: no progress for 2 stalls (3 consecutive iterations)");
+                return Ok(1);
+            }
+        } else {
+            stalls = 0;
+        }
+        prev_gate = gate_state.to_string();
+    }
+    eprintln!("STOP: max_iterations reached");
+    Ok(1)
+}
+
+/// Interactive driver: like `run`, but answers/quit arrive via `crx`. When only
+/// blocked items remain, it blocks for a command instead of stopping. Returns 0 on
+/// DONE, 1 on cap/stall, Err on hard error.
+pub async fn run_interactive(
+    cfg: &Config,
+    ws: &Path,
+    reporter: Arc<dyn Reporter>,
+    crx: &mut mpsc::UnboundedReceiver<Command>,
+) -> Result<i32> {
+    let bk = ws.join(".agentloop/state/backlog.json");
+    let maxit = cfg.max_iterations();
+    let budget = Duration::from_secs(cfg.total_budget_sec());
+    let start = Instant::now();
+    let (mut n, mut stalls) = (0u32, 0u32);
+    let mut prev_gate = String::from("init");
+
+    while n < maxit {
+        n += 1;
+        if start.elapsed() >= budget {
+            eprintln!("STOP: time budget exceeded");
+            return Ok(1);
+        }
+
+        let merged = iterate(cfg, ws, n, &reporter).await?;
+
+        let grc = gate(ws);
+        let gate_state = if grc == 0 { "pass" } else { "fail" };
+        let open = state::open_count(&bk)?;
+        reporter.iteration(n, merged, gate_state, open);
+
+        if gate_state == "pass" && open == 0 {
+            eprintln!("DONE");
+            return Ok(0);
+        }
+
+        let blocked = state::blocked_count(&bk)?;
+        // Only blocked work remains: wait for the user to answer (or quit).
+        if open > 0 && open == blocked {
+            match crx.recv().await {
+                None | Some(Command::Quit) => return Ok(0),
+                Some(Command::AnswerQuestion { item_id, text }) => {
+                    let _ = apply_answer(ws, &item_id, &text);
+                }
+                Some(Command::AddTask { .. }) => { /* Phase 3 */ }
+            }
+            stalls = 0;
+            prev_gate = gate_state.to_string();
+            continue;
         }
 
         if merged == 0 && gate_state == prev_gate {

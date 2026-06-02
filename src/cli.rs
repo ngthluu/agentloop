@@ -127,10 +127,16 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let rc = orchestrator::run(&cfg, &ws, Arc::new(EventLineReporter)).await?;
-    eprintln!(
-        "=== agentloop finished (rc={rc}). See {}/.agentloop/state/master.md ===",
-        ws.display()
-    );
-    std::process::exit(rc);
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        let rc = crate::app::run_tui(cfg, ws.clone(), args.goal.clone()).await?;
+        std::process::exit(rc);
+    } else {
+        let rc = orchestrator::run(&cfg, &ws, Arc::new(EventLineReporter)).await?;
+        eprintln!(
+            "=== agentloop finished (rc={rc}). See {}/.agentloop/state/master.md ===",
+            ws.display()
+        );
+        std::process::exit(rc);
+    }
 }
