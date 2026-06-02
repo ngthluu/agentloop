@@ -1,7 +1,8 @@
 use chrono::Local;
+use tokio::sync::mpsc;
 
 /// Progress sink. Phase 1 uses EventLineReporter (stderr lines, mirroring the
-/// non-TTY behavior of lib/progress.sh). Phases 2-3 add a TUI implementation.
+/// non-TTY behavior of lib/progress.sh). Phase 2 adds ChannelReporter (TUI).
 pub trait Reporter: Send + Sync {
     /// A job (planner or worker) has been dispatched.
     fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str);
@@ -9,6 +10,10 @@ pub trait Reporter: Send + Sync {
     fn status(&self, id: &str, status: &str, tool: &str, model: &str);
     /// End-of-iteration summary line.
     fn iteration(&self, n: u32, merged: u32, gate: &str, open: i64);
+    /// An agent raised a question for the user. Default: no-op.
+    fn question(&self, _item_id: &str, _label: &str, _text: &str, _context: &str) {}
+    /// The loop entered the standby state (Phase 3). Default: no-op.
+    fn standby(&self) {}
 }
 
 pub struct EventLineReporter;
@@ -26,5 +31,95 @@ impl Reporter for EventLineReporter {
     }
     fn iteration(&self, n: u32, merged: u32, gate: &str, open: i64) {
         eprintln!("iter {n}: merged={merged} gate={gate} open={open}");
+    }
+    fn question(&self, item_id: &str, _label: &str, text: &str, _context: &str) {
+        eprintln!("{}  question  {:<10} {}", hms(), item_id, text);
+    }
+    fn standby(&self) {
+        eprintln!("=== standby: waiting for input ===");
+    }
+}
+
+/// Orchestrator -> UI.
+#[derive(Debug, Clone)]
+pub enum Event {
+    JobDispatched {
+        id: String,
+        label: String,
+        tool: String,
+        model: String,
+    },
+    JobStatus {
+        id: String,
+        status: String,
+    },
+    QuestionRaised {
+        item_id: String,
+        label: String,
+        text: String,
+        context: String,
+    },
+    Iteration {
+        n: u32,
+        merged: u32,
+        gate: String,
+        open: i64,
+    },
+    EnteredStandby,
+    Shutdown,
+}
+
+/// UI -> orchestrator.
+#[derive(Debug, Clone)]
+pub enum Command {
+    AnswerQuestion { item_id: String, text: String },
+    AddTask { request: String },
+    Quit,
+}
+
+/// Reporter that forwards progress to the TUI over a channel.
+pub struct ChannelReporter {
+    tx: mpsc::UnboundedSender<Event>,
+}
+
+impl ChannelReporter {
+    pub fn new(tx: mpsc::UnboundedSender<Event>) -> Self {
+        Self { tx }
+    }
+}
+
+impl Reporter for ChannelReporter {
+    fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str) {
+        let _ = self.tx.send(Event::JobDispatched {
+            id: id.into(),
+            label: label.into(),
+            tool: tool.into(),
+            model: model.into(),
+        });
+    }
+    fn status(&self, id: &str, status: &str, _tool: &str, _model: &str) {
+        let _ = self.tx.send(Event::JobStatus {
+            id: id.into(),
+            status: status.into(),
+        });
+    }
+    fn iteration(&self, n: u32, merged: u32, gate: &str, open: i64) {
+        let _ = self.tx.send(Event::Iteration {
+            n,
+            merged,
+            gate: gate.into(),
+            open,
+        });
+    }
+    fn question(&self, item_id: &str, label: &str, text: &str, context: &str) {
+        let _ = self.tx.send(Event::QuestionRaised {
+            item_id: item_id.into(),
+            label: label.into(),
+            text: text.into(),
+            context: context.into(),
+        });
+    }
+    fn standby(&self) {
+        let _ = self.tx.send(Event::EnteredStandby);
     }
 }

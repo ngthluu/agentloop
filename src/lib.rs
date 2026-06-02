@@ -1,9 +1,12 @@
+pub mod app;
 pub mod cli;
 pub mod config;
 pub mod events;
+pub mod inbox;
 pub mod orchestrator;
 pub mod planner;
 pub mod spawn;
 pub mod state;
+pub mod tui;
 pub mod worker;
 pub mod worktree;
