@@ -19,9 +19,16 @@ fn find(term: &Terminal<TestBackend>, needle: &str) -> Option<(u16, u16)> {
     None
 }
 
+fn started(goal: &str) -> AppState {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut s = AppState::new(goal.into());
+    let _ = s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // leave goal-entry
+    s
+}
+
 #[test]
 fn jobs_render_above_inbox_full_width() {
-    let mut s = AppState::new("goal".into());
+    let mut s = started("goal");
     s.apply(Event::JobDispatched {
         id: "it-1".into(), label: "scaffold".into(), tool: "codex".into(),
         model: "gpt-5".into(), log_path: None,
@@ -36,15 +43,35 @@ fn jobs_render_above_inbox_full_width() {
 
     let jobs = find(&term, "Jobs").expect("Jobs pane rendered");
     let inbox = find(&term, "Inbox").expect("Inbox pane rendered");
-    // Vertical stacking: Jobs title is on an earlier row than Inbox title.
     assert!(jobs.0 < inbox.0, "Jobs ({jobs:?}) is above Inbox ({inbox:?})");
 }
 
 #[test]
 fn status_bar_shows_total_time() {
-    let s = AppState::new("goal".into());
+    let s = started("goal");
     let backend = TestBackend::new(80, 24);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|f| tui::render(f, &s)).unwrap();
     assert!(find(&term, "\u{23f1}").is_some(), "status bar shows the ⏱ total-time glyph");
+}
+
+#[test]
+fn goal_entry_screen_shows_prompt_and_continue() {
+    let s = AppState::new(String::new()); // starts on the goal-entry view
+    let backend = TestBackend::new(80, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+    assert!(find(&term, "Continue").is_some(), "Continue button rendered");
+    assert!(find(&term, "build").is_some(), "entry prompt mentions what to build");
+}
+
+#[test]
+fn list_view_shows_input_target_label() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut s = AppState::new("g".into());
+    let _ = s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let backend = TestBackend::new(80, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+    assert!(find(&term, "Add task").is_some(), "bottom input shows the Add task target");
 }
