@@ -397,7 +397,7 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         .style(Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD));
     f.render_widget(status_bar, chunks[0]);
 
-    // --- Main area: jobs (left) + inbox (right), or the job-detail view ---
+    // --- Main area: jobs (top) + inbox (bottom), or the job-detail view ---
     if s.in_job_detail() {
         render_job_detail(f, s, chunks[1]);
     } else {
