@@ -5,6 +5,7 @@ pub mod events;
 pub mod inbox;
 pub mod orchestrator;
 pub mod planner;
+pub mod requests;
 pub mod spawn;
 pub mod state;
 pub mod tui;
