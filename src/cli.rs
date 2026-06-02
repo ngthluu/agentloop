@@ -96,6 +96,24 @@ pub fn bootstrap_workspace(ws: &Path, goal: &str, config: Option<&Path>) -> Resu
     Ok(cfg_path)
 }
 
+/// Additive re-run: any new goal text is treated as MORE context layered onto the
+/// existing effort, never a different goal. If goal.md already contains the text,
+/// this is a no-op (a plain resume). Otherwise the text is queued as a pending
+/// request (so the planner folds it into the backlog) and appended to goal.md.
+pub fn fold_rerun_goal(ws: &Path, goal: &str) -> Result<()> {
+    let goalf = ws.join(".agentloop/state/goal.md");
+    let existing = std::fs::read_to_string(&goalf).unwrap_or_default();
+    let trimmed = goal.trim();
+    if trimmed.is_empty() || existing.contains(trimmed) {
+        return Ok(());
+    }
+    crate::requests::append(ws, trimmed)?;
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let addition = format!("\n## Added {stamp}\n{trimmed}\n");
+    std::fs::write(&goalf, format!("{existing}{addition}"))?;
+    Ok(())
+}
+
 pub async fn run() -> Result<()> {
     let args = Args::parse();
     let ws = args.workspace.clone().unwrap_or(std::env::current_dir()?);
@@ -105,6 +123,9 @@ pub async fn run() -> Result<()> {
 
     let cfg_path = bootstrap_workspace(&ws, &args.goal, args.config.as_deref())?;
     let ws = ws.canonicalize().unwrap_or(ws);
+    if !args.fresh {
+        fold_rerun_goal(&ws, &args.goal)?;
+    }
     let mut cfg = Config::load(&cfg_path)?;
     if let Some(m) = args.max_iterations {
         cfg.caps.max_iterations = Some(m);
