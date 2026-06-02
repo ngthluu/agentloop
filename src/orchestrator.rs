@@ -239,6 +239,11 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                             reporter.status(id, "merged", "", "");
                             merged += 1;
                         } else {
+                            // The resolver itself is unbounded (it never consumes an
+                            // attempt). But a failed resolve bounces the item back to
+                            // `ready`, so the next WORKER re-dispatch consumes an attempt
+                            // — that bound is deliberate, so a perpetually-conflicting
+                            // item can't loop forever.
                             worktree::abort_merge(ws);
                             state::set_status(&bk, id, "ready", "merge conflict; resolver failed")?;
                             reporter.status(id, "bounced", "", "");
