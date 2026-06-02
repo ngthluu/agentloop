@@ -10,6 +10,10 @@ fn commit_goal_writes_when_fresh_and_folds_when_existing() {
     std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
     std::fs::write(ws.join(".agentloop/state/goal.md"), "").unwrap();
 
+    // Fresh + blank goal: no-op, goal.md stays empty.
+    commit_goal(&ws, "   ").unwrap();
+    assert!(std::fs::read_to_string(ws.join(".agentloop/state/goal.md")).unwrap().trim().is_empty());
+
     // Fresh (empty goal.md): commit writes the goal directly.
     commit_goal(&ws, "build a todo app").unwrap();
     let g = std::fs::read_to_string(ws.join(".agentloop/state/goal.md")).unwrap();

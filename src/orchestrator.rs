@@ -359,7 +359,9 @@ pub async fn run_interactive(
         match crx.recv().await {
             None | Some(Command::Quit) => return Ok(0),
             Some(Command::StartRun { goal }) => {
-                let _ = crate::cli::commit_goal(ws, &goal);
+                if let Err(e) = crate::cli::commit_goal(ws, &goal) {
+                    eprintln!("failed to commit goal: {e:#}");
+                }
                 break;
             }
             // Stray answer/add-task before the run starts: ignore.
