@@ -55,13 +55,19 @@ Options:
   stays the sole owner of the backlog).
 - **Standby:** on completion (or a cap/stall) the interactive run idles in standby instead
   of exiting; adding a task or answering a question re-engages it with a fresh budget window.
+- **Re-run = more context:** re-running with new goal text (without `--fresh`) appends it
+  to `goal.md` and queues it as a pending request, so the planner folds it into the backlog
+  as new tasks and the loop re-engages — instead of reporting an instant "Done, nothing changed."
 
 ## Interactive mode (TUI)
 
 Running in a terminal opens a full-screen panel. Keys:
 
-- `↑`/`↓` — navigate the question inbox
-- `enter` — answer the selected question (type, `enter` to submit, `esc` to cancel)
+- `tab` — switch focus between the Jobs and Inbox panes (the focused pane is highlighted)
+- `↑`/`↓` — navigate the focused pane (jobs or the question inbox)
+- `enter` — on the Jobs pane: open the selected job's detail (live log tail + a real-time
+  working timer); on the Inbox: answer the selected question (type, `enter` submit, `esc` cancel)
+- `esc` — leave the job-detail view
 - `a` — add a task (type a natural-language request, `enter` to submit)
 - `q` — quit
 
