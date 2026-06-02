@@ -39,3 +39,18 @@ fn create_merge_remove_roundtrip() {
     worktree::remove(&repo, &wt, "item/it-1");
     assert!(!wt.exists());
 }
+
+#[test]
+fn git_output_is_captured_to_run_log() {
+    let repo = init_repo();
+    // app.rs creates this dir at runtime; create it so the helper logs there.
+    std::fs::create_dir_all(repo.join(".agentloop/logs")).unwrap();
+
+    // A successful worktree op should still work and leave nothing on our stdout.
+    let wt = repo.join(".agentloop/worktrees/it-1");
+    std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+    worktree::create(&repo, "item/it-1", &wt).unwrap();
+
+    let log = std::fs::read_to_string(repo.join(".agentloop/logs/run.log")).unwrap();
+    assert!(log.contains("git worktree add"), "git invocation logged: {log}");
+}
