@@ -49,11 +49,12 @@ the panel piling up in scrollback rather than updating in place.
 to `.agentloop/logs/run.log`:
 
 - After `setup_terminal()` and before the event loop: open/create `run.log`,
-  `libc::dup(2)` to save the original stderr, then `libc::dup2(logfile_fd, 2)`.
-- In/after `restore_terminal()`: `libc::dup2(saved_fd, 2)` to restore, so the
+  `nix::unistd::dup(stderr)` to save the original stderr, then
+  `nix::unistd::dup2(logfile_fd, stderr_fd)`.
+- In/after `restore_terminal()`: `dup2(saved_fd, stderr_fd)` to restore, so the
   post-exit summary still reaches the real terminal.
-- Unix-only, behind `#[cfg(unix)]`, using the existing `libc` dependency. No-op on
-  non-Unix.
+- Unix-only, behind `#[cfg(unix)]`, using the existing `nix` dependency (already
+  pulled in for signal/process handling). No-op on non-Unix.
 
 Orchestrator diagnostics then land in `run.log` (still inspectable), the TUI renders
 one stable frame, and no `eprintln!` call sites change. The headless path
