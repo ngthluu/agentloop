@@ -59,26 +59,7 @@ impl Config {
             return path;
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            home_dir()
-                .join("Library")
-                .join("Application Support")
-                .join("agentloop")
-                .join("config.json")
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            if let Some(path) = non_empty_env_path("XDG_CONFIG_HOME") {
-                path.join("agentloop").join("config.json")
-            } else {
-                home_dir()
-                    .join(".config")
-                    .join("agentloop")
-                    .join("config.json")
-            }
-        }
+        home_dir().join(".agentloop").join("config.json")
     }
 
     pub fn ensure_default_config(path: &Path) -> Result<PathBuf> {

@@ -1,8 +1,11 @@
 use agentloop::config::Config;
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::LazyLock;
+use std::sync::Mutex;
 
 static CFG_CTR: AtomicU32 = AtomicU32::new(0);
+static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn temp_path(name: &str) -> std::path::PathBuf {
     let n = CFG_CTR.fetch_add(1, Ordering::Relaxed);
@@ -75,6 +78,32 @@ fn ensure_default_creates_global_json() {
     let cfg = Config::load(&path).unwrap();
     assert_eq!(cfg.resolve_role("missing").as_deref(), Some("builder"));
     assert_eq!(cfg.role_field("builder", "tool").as_deref(), Some("codex"));
+}
+
+#[test]
+fn default_config_path_is_home_agentloop_json() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let old_home = std::env::var_os("HOME");
+    let old_cfg = std::env::var_os("AGENTLOOP_CONFIG");
+    let home = temp_path("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("AGENTLOOP_CONFIG");
+
+    assert_eq!(
+        Config::default_config_path(),
+        home.join(".agentloop").join("config.json")
+    );
+
+    match old_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    match old_cfg {
+        Some(value) => std::env::set_var("AGENTLOOP_CONFIG", value),
+        None => std::env::remove_var("AGENTLOOP_CONFIG"),
+    }
 }
 
 #[test]

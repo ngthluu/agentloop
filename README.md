@@ -55,9 +55,7 @@ and run directly without the entry screen.
 Options:
 
 - `--config <path>` — `config.json` path. By default agentloop uses
-  `$AGENTLOOP_CONFIG` when set, otherwise the platform config directory
-  (`~/Library/Application Support/agentloop/config.json` on macOS, or
-  `$XDG_CONFIG_HOME/agentloop/config.json` / `~/.config/agentloop/config.json` on Unix).
+  `$AGENTLOOP_CONFIG` when set, otherwise `~/.agentloop/config.json`.
 - `--fresh` — wipe existing `.agentloop` state and start over
 - `--max-iterations N` — override `caps.max_iterations` from config
 - `--dry-run` — run the manager once and print the business backlog; do not dispatch builders
@@ -68,9 +66,9 @@ Options:
   with `.agentloop/state/master.md` as the human-readable status board. Per-task
   technical state lives under `.agentloop/state/tasks/<task-id>/`, including the
   architect's `design.md`, builder subitems, and customer approval state.
-- **Routing:** global `config.json` maps roles to tool/model/effort. The available
-  roles are `manager`, `architect`, `builder`, `customer`, and `resolver`. Tool
-  permission switches are fixed by agentloop: `claude` always gets
+- **Routing:** global `~/.agentloop/config.json` maps roles to tool/model/effort.
+  The available roles are `manager`, `architect`, `builder`, `customer`, and
+  `resolver`. Tool permission switches are fixed by agentloop: `claude` always gets
   `--dangerously-skip-permissions`, and `codex` always gets `--yolo`.
 - **Gate and customer:** `.agentloop/verify.sh` still gates software behavior, so
   agentloop can target any kind of software. After the gate passes for a business
