@@ -154,7 +154,6 @@ pub async fn run() -> Result<()> {
     }
 
     let goal_arg = args.goal.clone();
-    bootstrap_workspace(&ws, goal_arg.as_deref().unwrap_or(""))?;
     let cfg_path = if let Some(path) = args.config.as_deref() {
         if !path.exists() {
             bail!("config path does not exist: {}", path.display());
@@ -163,6 +162,7 @@ pub async fn run() -> Result<()> {
     } else {
         Config::ensure_default_config(&Config::default_config_path())?
     };
+    bootstrap_workspace(&ws, goal_arg.as_deref().unwrap_or(""))?;
     let ws = ws.canonicalize().unwrap_or(ws);
     if !args.fresh {
         if let Some(g) = goal_arg.as_deref() {

@@ -1,4 +1,5 @@
 use agentloop::cli;
+use std::process::Command;
 
 #[test]
 fn bootstrap_creates_state_and_git() {
@@ -25,5 +26,37 @@ fn bootstrap_creates_state_and_git() {
     assert!(!ws.join(".agentloop/config.json").exists());
     let gi = std::fs::read_to_string(ws.join(".gitignore")).unwrap();
     assert!(gi.contains(".agentloop/"));
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn missing_explicit_config_does_not_bootstrap_workspace() {
+    let ws = std::env::temp_dir().join(format!(
+        "alboot-missing-config-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cfg = ws.join("missing-config.json");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_agentloop"))
+        .arg("build a todo app")
+        .arg("--workspace")
+        .arg(&ws)
+        .arg("--config")
+        .arg(&cfg)
+        .arg("--dry-run")
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("config path does not exist"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(!ws.join(".agentloop").exists());
+    assert!(!ws.join(".git").exists());
     let _ = std::fs::remove_dir_all(&ws);
 }
