@@ -127,3 +127,32 @@ fn list_view_shows_input_target_label() {
         "bottom input shows the Add task target"
     );
 }
+
+#[test]
+fn inbox_pane_scrolls_to_keep_selection_visible() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut s = started("goal");
+    for i in 0..40 {
+        s.apply(Event::QuestionRaised {
+            item_id: format!("q-{i}"),
+            label: format!("inbLABEL{i}"),
+            text: "pick one".into(),
+            context: "".into(),
+        });
+    }
+    // Focus defaults to Inbox; move the selection to the last question.
+    for _ in 0..39 {
+        s.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let backend = TestBackend::new(80, 20);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+    assert!(
+        find(&term, "inbLABEL39").is_some(),
+        "selected (last) question scrolled into view"
+    );
+    assert!(
+        find(&term, "inbLABEL0 ").is_none(),
+        "first question scrolled out of view"
+    );
+}

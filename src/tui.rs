@@ -530,20 +530,11 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         let inbox_items: Vec<ListItem> = s
             .inbox
             .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let style = if !s.focus_is_jobs() && i == s.selected {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
+            .map(|p| {
                 ListItem::new(Line::from(format!(
                     " \u{2753} {} \u{2014} {}",
                     p.label, p.text
                 )))
-                .style(style)
             })
             .collect();
         let inbox_border = if s.focus_is_jobs() {
@@ -551,13 +542,26 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         } else {
             Color::Yellow
         };
-        let inbox_list = List::new(inbox_items).block(
-            Block::default()
-                .title(" Inbox ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(inbox_border)),
-        );
-        f.render_widget(inbox_list, main_chunks[1]);
+        let inbox_highlight = if !s.focus_is_jobs() {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let inbox_list = List::new(inbox_items)
+            .block(
+                Block::default()
+                    .title(" Inbox ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(inbox_border)),
+            )
+            .highlight_style(inbox_highlight);
+        let mut inbox_state = ListState::default();
+        if !s.inbox.is_empty() {
+            inbox_state.select(Some(s.selected.min(s.inbox.len() - 1)));
+        }
+        f.render_stateful_widget(inbox_list, main_chunks[1], &mut inbox_state);
     }
 
     // --- Persistent bottom input bar ---
