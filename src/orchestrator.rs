@@ -169,9 +169,28 @@ fn invalidate_task_plan(ws: &Path, task_id: &str) {
     clear_customer_review(ws, task_id);
 }
 
-fn reopen_parent_for_redesign(bk: &Path, ws: &Path, task_id: &str, note: &str) -> Result<()> {
-    state::set_status(bk, task_id, "ready", note)?;
-    invalidate_task_plan(ws, task_id);
+fn reopen_parent_for_redesign(
+    bk: &Path,
+    ws: &Path,
+    task_id: &str,
+    note: &str,
+    max_redesigns: u32,
+) -> Result<()> {
+    let count = task_state::bump_redesign(ws, task_id, note)?;
+    if count >= max_redesigns {
+        // The task keeps failing after its builders complete. Stop the redesign loop:
+        // mark it failed (so it leaves the open set) and keep the plan for inspection.
+        state::set_status(
+            bk,
+            task_id,
+            "failed",
+            &format!("redesign cap ({max_redesigns}) reached; last failure: {note}"),
+        )?;
+    } else {
+        // Under the cap: reopen for a fresh, feedback-informed architect pass.
+        state::set_status(bk, task_id, "ready", note)?;
+        invalidate_task_plan(ws, task_id);
+    }
     Ok(())
 }
 
@@ -341,7 +360,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                 {
                     pending_redesign.insert(task_id.clone(), note);
                 } else {
-                    reopen_parent_for_redesign(&bk, ws, task_id, &note)?;
+                    reopen_parent_for_redesign(&bk, ws, task_id, &note, maxatt)?;
                 }
                 break;
             }
@@ -367,7 +386,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                 {
                     pending_redesign.insert(task_id.clone(), note);
                 } else {
-                    reopen_parent_for_redesign(&bk, ws, task_id, &note)?;
+                    reopen_parent_for_redesign(&bk, ws, task_id, &note, maxatt)?;
                 }
                 break;
             }
@@ -509,7 +528,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     }
 
     for (task_id, note) in pending_redesign {
-        reopen_parent_for_redesign(&bk, ws, &task_id, &note)?;
+        reopen_parent_for_redesign(&bk, ws, &task_id, &note, maxatt)?;
     }
 
     for task_id in active_business_ids(&bk, ws)? {
@@ -520,7 +539,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         }
         if gate(ws) != 0 {
             let feedback = gate_failure_feedback(ws);
-            reopen_parent_for_redesign(&bk, ws, &task_id, &feedback)?;
+            reopen_parent_for_redesign(&bk, ws, &task_id, &feedback, maxatt)?;
             continue;
         }
         let backlog = state::read(&bk)?;
@@ -535,10 +554,11 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         reporter.dispatch(&cid, "customer review", &ctool, &cmodel, Some(&log));
         if customer::customer_run(cfg, ws, &task, &log, itimeout).await? {
             state::set_status(&bk, &task_id, "done", "")?;
+            task_state::reset_redesign(ws, &task_id);
             reporter.status(&cid, "approved", &ctool, &cmodel);
         } else {
             let feedback = customer_feedback(ws, &task_id);
-            reopen_parent_for_redesign(&bk, ws, &task_id, &feedback)?;
+            reopen_parent_for_redesign(&bk, ws, &task_id, &feedback, maxatt)?;
             reporter.status(&cid, "rejected", &ctool, &cmodel);
         }
     }
@@ -758,5 +778,87 @@ pub async fn run_interactive(
             prev_gate = "init".into();
         }
         continue 'outer;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn tmp_ws(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A workspace with one in_progress business task whose single builder is done.
+    fn setup(ws: &Path) {
+        let sdir = ws.join(".agentloop/state");
+        std::fs::create_dir_all(&sdir).unwrap();
+        let backlog = json!({"items":[{
+            "id":"task-1","title":"t","desc":"d","deps":[],
+            "status":"in_progress","attempts":0,"acceptance":"a"
+        }]});
+        std::fs::write(sdir.join("backlog.json"), serde_json::to_vec(&backlog).unwrap()).unwrap();
+        let tdir = sdir.join("tasks/task-1");
+        std::fs::create_dir_all(&tdir).unwrap();
+        std::fs::write(tdir.join("design.md"), "design").unwrap();
+        std::fs::write(
+            tdir.join("builders.json"),
+            r#"{"items":[{"id":"task-1-b1","title":"t","desc":"d","deps":[],"status":"done","attempts":1,"acceptance":"a"}]}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn redesign_under_cap_reopens_invalidates_and_records_feedback() {
+        let ws = tmp_ws("orch-under");
+        setup(&ws);
+        let bk = ws.join(".agentloop/state/backlog.json");
+
+        reopen_parent_for_redesign(&bk, &ws, "task-1", "gate failed", 3).unwrap();
+
+        let v = state::read(&bk).unwrap();
+        assert_eq!(state::item(&v, "task-1").unwrap()["status"], "ready");
+        assert!(
+            !task_state::builders_path(&ws, "task-1").exists(),
+            "plan invalidated under the cap"
+        );
+        let (count, fb) = task_state::read_redesign(&ws, "task-1");
+        assert_eq!(count, 1);
+        assert_eq!(fb, "gate failed");
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn redesign_at_cap_fails_task_and_keeps_plan() {
+        let ws = tmp_ws("orch-cap");
+        setup(&ws);
+        let bk = ws.join(".agentloop/state/backlog.json");
+
+        // Two prior redesigns already recorded; cap is 3.
+        task_state::bump_redesign(&ws, "task-1", "x").unwrap();
+        task_state::bump_redesign(&ws, "task-1", "x").unwrap();
+
+        // This call makes count = 3 == cap -> the task fails instead of looping.
+        reopen_parent_for_redesign(&bk, &ws, "task-1", "still failing", 3).unwrap();
+
+        let v = state::read(&bk).unwrap();
+        assert_eq!(state::item(&v, "task-1").unwrap()["status"], "failed");
+        assert!(
+            task_state::builders_path(&ws, "task-1").exists(),
+            "plan is kept for inspection when the cap is hit"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }
