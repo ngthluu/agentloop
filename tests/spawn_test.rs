@@ -12,21 +12,25 @@ use tokio::sync::Mutex;
 static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn cfg() -> Config {
-    serde_yaml::from_str(r#"
-routing:
-  planner: { tool: claude, model: opus, effort: high, flags: "--flag-a --flag-b" }
-  build:   { tool: codex,  model: gpt-5, effort: high, flags: "" }
-defaults: { role: build }
-"#).unwrap()
+    serde_json::from_str(
+        r#"{
+            "routing": {
+                "manager": { "tool": "claude", "model": "opus", "effort": "high" },
+                "builder": { "tool": "codex", "model": "gpt-5", "effort": "high" }
+            },
+            "defaults": { "role": "builder" }
+        }"#,
+    )
+    .unwrap()
 }
 
 #[test]
-fn claude_argv() {
-    let a = spawn::build_argv(&cfg(), "planner", "HELLO").unwrap();
+fn claude_argv_injects_skip_permissions() {
+    let a = spawn::build_argv(&cfg(), "manager", "HELLO").unwrap();
     assert_eq!(a, vec![
         "claude","-p","HELLO",
         "--output-format","stream-json","--verbose",
-        "--model","opus","--effort","high","--flag-a","--flag-b",
+        "--model","opus","--effort","high","--dangerously-skip-permissions",
     ]);
 }
 
@@ -78,16 +82,16 @@ fn fmt_blank_line_yields_nothing() {
 }
 
 #[test]
-fn codex_argv() {
-    let a = spawn::build_argv(&cfg(), "build", "DOIT").unwrap();
+fn codex_argv_injects_yolo() {
+    let a = spawn::build_argv(&cfg(), "builder", "DOIT").unwrap();
     assert_eq!(a, vec![
-        "codex","exec","DOIT","-m","gpt-5","-c","model_reasoning_effort=high"
+        "codex","exec","DOIT","-m","gpt-5","-c","model_reasoning_effort=high","--yolo"
     ]);
 }
 
 #[test]
 fn unknown_tool_errors() {
-    let c: Config = serde_yaml::from_str("routing: { x: { tool: nope } }\ndefaults: {}\n").unwrap();
+    let c: Config = serde_json::from_str(r#"{"routing":{"x":{"tool":"nope"}},"defaults":{}}"#).unwrap();
     assert!(spawn::build_argv(&c, "x", "p").is_err());
 }
 
@@ -105,7 +109,7 @@ async fn fake_agent_runs_and_logs_argv() {
     std::fs::create_dir_all(&dir).unwrap();
     let log: PathBuf = dir.join("agent.log");
 
-    let rc = spawn::agent_run(&cfg(), "planner", "HELLO", &dir, &log, Duration::from_secs(10)).await.unwrap();
+    let rc = spawn::agent_run(&cfg(), "manager", "HELLO", &dir, &log, Duration::from_secs(10)).await.unwrap();
     assert_eq!(rc, 0);
     let logged = std::fs::read_to_string(&log).unwrap();
     assert!(logged.contains("FAKE_ARGS:"), "log: {logged}");
@@ -127,7 +131,7 @@ async fn timeout_returns_124() {
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("agent.log");
 
-    let rc = spawn::agent_run(&cfg(), "planner", "P", &dir, &log, Duration::from_secs(1)).await.unwrap();
+    let rc = spawn::agent_run(&cfg(), "manager", "P", &dir, &log, Duration::from_secs(1)).await.unwrap();
     assert_eq!(rc, 124);
     std::env::remove_var("FAKE_AGENT");
     std::env::remove_var("FAKE_AGENT_BIN");
@@ -151,7 +155,7 @@ async fn kill_all_agents_terminates_in_flight() {
 
     let dir2 = dir.clone();
     let handle = tokio::spawn(async move {
-        spawn::agent_run(&cfg(), "planner", "P", &dir2, &log, Duration::from_secs(60)).await
+        spawn::agent_run(&cfg(), "manager", "P", &dir2, &log, Duration::from_secs(60)).await
     });
 
     // Wait for the agent to register its process group.

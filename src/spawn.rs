@@ -47,7 +47,6 @@ pub fn build_argv(cfg: &Config, role: &str, prompt: &str) -> Result<Vec<String>>
     let tool = cfg.role_field(&rrole, "tool").context("role has no tool")?;
     let model = cfg.role_field(&rrole, "model");
     let effort = cfg.role_field(&rrole, "effort");
-    let flags = cfg.role_field(&rrole, "flags");
 
     let mut argv: Vec<String> = Vec::new();
     match tool.as_str() {
@@ -83,10 +82,10 @@ pub fn build_argv(cfg: &Config, role: &str, prompt: &str) -> Result<Vec<String>>
             argv.push(e);
         }
     }
-    if let Some(f) = flags {
-        for tok in f.split_whitespace() {
-            argv.push(tok.to_string());
-        }
+    match tool.as_str() {
+        "claude" => argv.push("--dangerously-skip-permissions".into()),
+        "codex" => argv.push("--yolo".into()),
+        _ => {}
     }
     Ok(argv)
 }
