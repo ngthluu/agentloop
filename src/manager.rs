@@ -30,10 +30,10 @@ Your job each round:
 3. Add/split/refine business tasks so the GOAL is represented as user-visible outcomes with clear acceptance criteria.
 4. The orchestrator FAILS any item once its attempts reach {max_attempts} (the max_attempts cap).
    So for any item nearing attempts={max_attempts}, reshape it into smaller business outcomes or drop it.
-5. Keep each item business-facing: describe what the user gets, not how builders implement it.
+5. Keep each item business-facing: describe what the user gets, not implementation details.
 
 OUTPUT CONTRACT — you MUST overwrite .agentloop/state/backlog.json with valid JSON:
-{{"items":[{{"id","title","desc","role":"architect","deps":[],"status":"ready|in_progress|done|failed|blocked","attempts":0,"acceptance"}}]}}
+{{"items":[{{"id":"task-1","title":"User-visible outcome","desc":"What the user needs","deps":[],"status":"ready","attempts":0,"acceptance":"Observable acceptance criteria"}}]}}
 Also rewrite .agentloop/state/master.md as a human-readable status board.
 Do not print the JSON to stdout; write the files.{requests}"#,
         ws = ws.display(),

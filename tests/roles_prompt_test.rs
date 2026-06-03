@@ -29,6 +29,10 @@ fn manager_prompt_is_business_only() {
     assert!(p.contains("master.md"));
     assert!(!p.contains("design.md"));
     assert!(!p.contains("builders.json"));
+    assert!(!p.contains("role"));
+    assert!(!p.contains("architect"));
+    assert!(!p.contains("builder"));
+    assert!(!p.contains("builders"));
     let _ = std::fs::remove_dir_all(&ws);
 }
 
