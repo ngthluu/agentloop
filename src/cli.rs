@@ -8,7 +8,6 @@ use crate::config::Config;
 use crate::events::EventLineReporter;
 use crate::orchestrator;
 
-const TEMPLATE_CONFIG: &str = include_str!("../templates/config.yaml");
 const TEMPLATE_MASTER: &str = include_str!("../templates/master.md");
 
 #[derive(Parser, Debug)]
@@ -19,7 +18,7 @@ struct Args {
     /// Target dir (default: current dir)
     #[arg(long)]
     workspace: Option<PathBuf>,
-    /// config.yaml path (default: <workspace>/.agentloop/config.yaml)
+    /// config.json path (default: global agentloop config.json)
     #[arg(long)]
     config: Option<PathBuf>,
     /// Wipe existing .agentloop state and start over
@@ -43,12 +42,19 @@ fn git(repo: &Path, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// Create .agentloop scaffolding, init git, seed state + config. Idempotent.
-pub fn bootstrap_workspace(ws: &Path, goal: &str, config: Option<&Path>) -> Result<PathBuf> {
+/// Create .agentloop scaffolding, init git, and seed state. Idempotent.
+pub fn bootstrap_workspace(ws: &Path, goal: &str) -> Result<()> {
     std::fs::create_dir_all(ws)?;
     let ws = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
     let meta = ws.join(".agentloop");
-    for sub in ["state", "results", "logs", "worktrees", "questions", "answers"] {
+    for sub in [
+        "state",
+        "results",
+        "logs",
+        "worktrees",
+        "questions",
+        "answers",
+    ] {
         std::fs::create_dir_all(meta.join(sub))?;
     }
 
@@ -73,13 +79,6 @@ pub fn bootstrap_workspace(ws: &Path, goal: &str, config: Option<&Path>) -> Resu
         git(&ws, &["commit", "-qm", "agentloop: initial commit"]);
     }
 
-    let cfg_path = match config {
-        Some(p) => p.to_path_buf(),
-        None => meta.join("config.yaml"),
-    };
-    if !cfg_path.exists() {
-        std::fs::write(&cfg_path, TEMPLATE_CONFIG)?;
-    }
     let master = meta.join("state/master.md");
     if !master.exists() {
         std::fs::write(&master, TEMPLATE_MASTER)?;
@@ -93,13 +92,13 @@ pub fn bootstrap_workspace(ws: &Path, goal: &str, config: Option<&Path>) -> Resu
         std::fs::write(&bk, "{\"items\":[]}\n")?;
     }
 
-    Ok(cfg_path)
+    Ok(())
 }
 
 /// Additive re-run: any new goal text is treated as MORE context layered onto the
 /// existing effort, never a different goal. If goal.md already contains the text,
 /// this is a no-op (a plain resume). Otherwise the text is queued as a pending
-/// request (so the planner folds it into the backlog) and appended to goal.md.
+/// request (so the manager folds it into the backlog) and appended to goal.md.
 pub fn fold_rerun_goal(ws: &Path, goal: &str) -> Result<()> {
     let goalf = ws.join(".agentloop/state/goal.md");
     let existing = std::fs::read_to_string(&goalf).unwrap_or_default();
@@ -155,7 +154,15 @@ pub async fn run() -> Result<()> {
     }
 
     let goal_arg = args.goal.clone();
-    let cfg_path = bootstrap_workspace(&ws, goal_arg.as_deref().unwrap_or(""), args.config.as_deref())?;
+    let cfg_path = if let Some(path) = args.config.as_deref() {
+        if !path.exists() {
+            bail!("config path does not exist: {}", path.display());
+        }
+        path.to_path_buf()
+    } else {
+        Config::ensure_default_config(&Config::default_config_path())?
+    };
+    bootstrap_workspace(&ws, goal_arg.as_deref().unwrap_or(""))?;
     let ws = ws.canonicalize().unwrap_or(ws);
     if !args.fresh {
         if let Some(g) = goal_arg.as_deref() {
@@ -181,8 +188,8 @@ pub async fn run() -> Result<()> {
     }
 
     if args.dry_run {
-        let log = ws.join(".agentloop/logs/dryrun-planner.log");
-        let ok = crate::planner::planner_run(
+        let log = ws.join(".agentloop/logs/dryrun-manager.log");
+        let ok = crate::manager::manager_run(
             &cfg,
             &ws,
             &log,
@@ -190,10 +197,10 @@ pub async fn run() -> Result<()> {
         )
         .await?;
         if !ok {
-            bail!("dry-run: planner produced invalid backlog");
+            bail!("dry-run: manager produced invalid backlog");
         }
         let bk = std::fs::read_to_string(ws.join(".agentloop/state/backlog.json"))?;
-        println!("dry-run: planned backlog ->\n{bk}");
+        println!("dry-run: managed backlog ->\n{bk}");
         return Ok(());
     }
 

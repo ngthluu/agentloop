@@ -73,7 +73,7 @@ pub fn mark_all_consumed(ws: &Path) -> Result<()> {
     write_all(ws, &all)
 }
 
-/// A planner-prompt section listing pending requests, or "" if none.
+/// A manager-prompt section listing pending requests, or "" if none.
 pub fn prompt_block(ws: &Path) -> Result<String> {
     let p = pending(ws)?;
     if p.is_empty() {

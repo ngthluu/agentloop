@@ -1,8 +1,10 @@
 # agentloop
 
-Autonomous app builder. Give it one goal; it plans a backlog, spawns `claude`/`codex`
-workers in parallel git worktrees, integrates their work, runs a planner-authored
-`verify.sh` gate, and loops until the app works or a safety cap trips.
+Autonomous app builder. Give it one goal; a manager maintains a business backlog,
+architects write per-task technical designs, builders implement independent subitems
+in parallel git worktrees, `verify.sh` checks software behavior, and a silly
+customer approves each business task against its acceptance criteria before the loop
+calls it done.
 
 When run in a terminal it shows a live TUI: a goal-entry screen lets you confirm or
 edit the goal before anything runs, then a progress panel, an inbox for answering
@@ -42,7 +44,7 @@ cargo build --release
 
 Every interactive (terminal) launch opens on a **goal-entry screen** first. The screen
 is pre-filled with the existing goal from `<workspace>/.agentloop/state/goal.md`, or
-empty on a fresh workspace. Nothing runs — no planner, no workers — until you
+empty on a fresh workspace. Nothing runs until you
 type/edit the goal and press `enter` (the "[ Continue ]" action). `Ctrl-C` at the
 entry screen quits without running. A goal passed as the CLI argument pre-fills the
 entry screen rather than starting immediately.
@@ -52,45 +54,50 @@ and run directly without the entry screen.
 
 Options:
 
-- `--config <path>` — config.yaml path (default: `<workspace>/.agentloop/config.yaml`)
+- `--config <path>` — `config.json` path. By default agentloop uses
+  `$AGENTLOOP_CONFIG` when set, otherwise the platform config directory
+  (`~/Library/Application Support/agentloop/config.json` on macOS, or
+  `$XDG_CONFIG_HOME/agentloop/config.json` / `~/.config/agentloop/config.json` on Unix).
 - `--fresh` — wipe existing `.agentloop` state and start over
 - `--max-iterations N` — override `caps.max_iterations` from config
-- `--dry-run` — run the planner once and print the planned backlog; do not dispatch workers
+- `--dry-run` — run the manager once and print the business backlog; do not dispatch builders
 
 ## How it works
 
-- **State:** `.agentloop/state/master.md` (human-readable status board) + `backlog.json`
-  (machine state). The planner rewrites both each iteration. The planner also writes and
-  maintains `.agentloop/state/design.md` (the technical solution design); `build` workers
-  implement against `design.md`.
-- **Routing:** edit `.agentloop/config.yaml` to map each role to a tool/model/effort/flags.
-  The available roles are `planner`, `build`, and `resolver`. The planner owns the
-  technical design and emits a dependency-aware backlog of `build` items; the loop
-  spawns each item according to its role.
-- **Gate:** the planner writes `.agentloop/verify.sh`; the loop runs it as the acceptance
-  check. This is what lets agentloop target any kind of software.
+- **State:** `.agentloop/state/backlog.json` is the manager-owned business backlog,
+  with `.agentloop/state/master.md` as the human-readable status board. Per-task
+  technical state lives under `.agentloop/state/tasks/<task-id>/`, including the
+  architect's `design.md`, builder subitems, and customer approval state.
+- **Routing:** global `config.json` maps roles to tool/model/effort. The available
+  roles are `manager`, `architect`, `builder`, `customer`, and `resolver`. Tool
+  permission switches are fixed by agentloop: `claude` always gets
+  `--dangerously-skip-permissions`, and `codex` always gets `--yolo`.
+- **Gate and customer:** `.agentloop/verify.sh` still gates software behavior, so
+  agentloop can target any kind of software. After the gate passes for a business
+  task, the customer approves or rejects that task by its acceptance criteria.
 - **Caps:** `max_iterations`, `max_parallel`, `item_timeout_sec`, `total_budget_sec`,
   `max_attempts`. The loop also stops on a no-progress stall.
 - **Parallelism:** independent ready items run concurrently, each in its own git worktree;
-  successful workers are merged back sequentially.
-- **Merge conflicts:** when a worker's branch conflicts on merge, agentloop spawns a
+  successful builders are merged back sequentially.
+- **Merge conflicts:** when a builder's branch conflicts on merge, agentloop spawns a
   dedicated **resolver** agent (config role `resolver`) in the workspace to resolve the
   conflict and complete the merge, instead of bouncing the item. The resolver is unbounded
   (no attempt cap, no timeout) but is killed when you quit, so it never orphans. If it
-  cannot resolve, the merge is aborted and the item bounces back to the planner.
-- **Question inbox:** a worker that needs a decision only you can make writes
+  cannot resolve, the merge is aborted and the item is returned for manager repair.
+- **Question inbox:** a builder that needs a decision only you can make writes
   `.agentloop/questions/<id>.json` and reports `status:"needs_input"`. The item is parked
   as `blocked` and surfaced in the TUI inbox. Your answer is stored in
   `.agentloop/answers/<id>.json` and the item is re-dispatched with the prior Q&A appended
   to its prompt.
 - **Add tasks any time:** an add-task request is appended to `.agentloop/state/requests.jsonl`;
-  the planner folds it into the backlog on its next round (you feed intent — the planner
-  stays the sole owner of the backlog).
+  the manager folds it into the business backlog on its next round (you feed intent;
+  the manager stays the sole owner of the backlog).
 - **Standby:** on completion (or a cap/stall) the interactive run idles in standby instead
   of exiting; adding a task or answering a question re-engages it with a fresh budget window.
 - **Re-run = more context:** re-running with new goal text (without `--fresh`) appends it
-  to `goal.md` and queues it as a pending request, so the planner folds it into the backlog
-  as new tasks and the loop re-engages — instead of reporting an instant "Done, nothing changed."
+  to `goal.md` and queues it as a pending request, so the manager folds it into the
+  business backlog as new tasks and the loop re-engages instead of reporting an instant
+  "Done, nothing changed."
 
 ## Interactive mode (TUI)
 
@@ -101,7 +108,7 @@ sits at the bottom of the screen at all times (similar to Claude Code's input). 
   automatically. `shift+enter` (or `alt+enter`) inserts a newline.
 - `enter` — submits the input. When the Inbox pane is focused and a question is
   selected, the input text is used as the answer to that question; otherwise the text
-  is added as a new task to the planner. A label above the input shows the current
+  is added as a new task for the manager. A label above the input shows the current
   target: "Answering \<id\>" or "Add task". When the input is empty, `enter` on the
   Jobs pane opens the selected job's detail view (live log tail + a real-time working
   timer).
@@ -128,17 +135,19 @@ src/
   state.rs         backlog.json validate / query / mutate (atomic writes)
   spawn.rs         timeout + claude/codex command building (+ fake-agent hook)
   worktree.rs      worktree create / merge / cleanup
-  planner.rs       planner prompt + invoke + validate
-  worker.rs        worker prompt + dispatch
+  manager.rs       business backlog prompt + invoke + validate
+  architect.rs     per-business-task design + builder plan prompt
+  worker.rs        builder and resolver prompts + dispatch
+  customer.rs      acceptance-criteria approval prompt + validation
+  task_state.rs    task-local design/builders/customer state helpers
   events.rs        Reporter trait, Event/Command enums, stderr + channel reporters
   inbox.rs         question/answer file IO + prior-Q&A prompt block
-  requests.rs      pending user-request log (requests.jsonl) + planner prompt block
+  requests.rs      pending user-request log (requests.jsonl) + manager prompt block
   orchestrator.rs  iteration loop, dispatch, integration, termination, standby machine
   tui.rs           ratatui view-model (events -> state, keys -> commands) + render
   app.rs           wires orchestrator + TUI over channels; TTY vs headless dispatch
   bin/fake_agent.rs  offline stub used by tests
 templates/
-  config.yaml      embedded default config (include_str!)
   master.md        embedded default master status board
 tests/             offline integration suite (fake_agent, scripted stub, no tokens)
 ```

@@ -22,9 +22,9 @@ pub fn backlog_valid(path: &Path) -> bool {
 }
 
 /// Ids that should be dispatched this round: items whose deps are all `done` and
-/// that are either `ready` or a planner dependency-`blocked` item with NO pending
+/// that are either `ready` or a manager dependency-`blocked` item with NO pending
 /// user question. Including the latter is what makes the loop fully autonomous —
-/// the planner uses `blocked` for sequencing, so such items run as soon as their
+/// the manager uses `blocked` for sequencing, so such items run as soon as their
 /// deps complete instead of stalling the loop. A `blocked` item that carries a real
 /// user question (`.agentloop/questions/<id>.json`) is left for the user to answer.
 pub fn ready_items(path: &Path, ws: &Path, max_parallel: usize) -> Result<Vec<String>> {
@@ -104,7 +104,7 @@ pub fn blocked_count(path: &Path) -> Result<i64> {
 }
 
 /// Items genuinely waiting on the user: `blocked` AND carrying a pending question
-/// file. Planner dependency-`blocked` items (no question) are excluded — they are
+/// file. Manager dependency-`blocked` items (no question) are excluded — they are
 /// dispatched by [`ready_items`], so they must not be mistaken for a user halt.
 pub fn user_blocked_count(path: &Path, ws: &Path) -> Result<i64> {
     let v = read(path)?;

@@ -14,7 +14,7 @@ fn tmp_ws() -> std::path::PathBuf {
 #[test]
 fn new_goal_text_is_appended_as_request_and_accumulated() {
     let ws = tmp_ws();
-    cli::bootstrap_workspace(&ws, "build a todo app", None).unwrap();
+    cli::bootstrap_workspace(&ws, "build a todo app").unwrap();
     cli::fold_rerun_goal(&ws, "also add due dates").unwrap();
 
     let goal = std::fs::read_to_string(ws.join(".agentloop/state/goal.md")).unwrap();
@@ -30,7 +30,7 @@ fn new_goal_text_is_appended_as_request_and_accumulated() {
 #[test]
 fn identical_rerun_text_is_a_noop() {
     let ws = tmp_ws();
-    cli::bootstrap_workspace(&ws, "build a todo app", None).unwrap();
+    cli::bootstrap_workspace(&ws, "build a todo app").unwrap();
     cli::fold_rerun_goal(&ws, "build a todo app").unwrap();
 
     let pending = requests::pending(&ws).unwrap();
