@@ -45,7 +45,6 @@ fn loads_json_and_resolves_roles() {
     assert_eq!(cfg.resolve_role("nonexistent").as_deref(), Some("builder"));
     assert_eq!(cfg.role_field("manager", "tool").as_deref(), Some("claude"));
     assert_eq!(cfg.role_field("manager", "model").as_deref(), Some("opus"));
-    assert_eq!(cfg.role_field("manager", "flags"), None);
     assert_eq!(cfg.max_iterations(), 7);
     assert_eq!(cfg.max_parallel(), 2);
     assert_eq!(cfg.max_attempts(), 3);
@@ -76,7 +75,6 @@ fn ensure_default_creates_global_json() {
     let cfg = Config::load(&path).unwrap();
     assert_eq!(cfg.resolve_role("missing").as_deref(), Some("builder"));
     assert_eq!(cfg.role_field("builder", "tool").as_deref(), Some("codex"));
-    assert_eq!(cfg.role_field("builder", "flags"), None);
 }
 
 #[test]

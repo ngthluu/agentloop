@@ -118,7 +118,6 @@ impl Config {
             "tool" => r.tool.clone(),
             "model" => r.model.clone(),
             "effort" => r.effort.clone(),
-            "flags" => None,
             _ => None,
         };
         v.filter(|s| !s.is_empty())

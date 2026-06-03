@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 /// Progress sink. Phase 1 uses EventLineReporter (stderr lines, mirroring the
 /// non-TTY behavior of lib/progress.sh). Phase 2 adds ChannelReporter (TUI).
 pub trait Reporter: Send + Sync {
-    /// A job (planner or worker) has been dispatched. `log` is the job's log file.
+    /// A job has been dispatched. `log` is the job's log file.
     fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str, log: Option<&Path>);
     /// A job changed status (done/failed/merged/bounced/...).
     fn status(&self, id: &str, status: &str, tool: &str, model: &str);

@@ -54,7 +54,7 @@ fn ready_respects_deps_and_parallel() {
     assert_eq!(state::ready_items(&p, ws, 1).unwrap(), vec!["it-2"]);
 }
 
-// A planner-emitted dependency "blocked" (no pending question) is dispatchable
+// A manager-emitted dependency "blocked" (no pending question) is dispatchable
 // once its deps are done — this is what makes the loop fully autonomous instead
 // of locking up. A "blocked" item that has a real user question is NOT dispatched.
 const BK_BLOCKED: &str = r#"{ "items": [

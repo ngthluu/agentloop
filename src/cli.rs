@@ -98,7 +98,7 @@ pub fn bootstrap_workspace(ws: &Path, goal: &str) -> Result<()> {
 /// Additive re-run: any new goal text is treated as MORE context layered onto the
 /// existing effort, never a different goal. If goal.md already contains the text,
 /// this is a no-op (a plain resume). Otherwise the text is queued as a pending
-/// request (so the planner folds it into the backlog) and appended to goal.md.
+/// request (so the manager folds it into the backlog) and appended to goal.md.
 pub fn fold_rerun_goal(ws: &Path, goal: &str) -> Result<()> {
     let goalf = ws.join(".agentloop/state/goal.md");
     let existing = std::fs::read_to_string(&goalf).unwrap_or_default();
@@ -188,8 +188,8 @@ pub async fn run() -> Result<()> {
     }
 
     if args.dry_run {
-        let log = ws.join(".agentloop/logs/dryrun-planner.log");
-        let ok = crate::planner::planner_run(
+        let log = ws.join(".agentloop/logs/dryrun-manager.log");
+        let ok = crate::manager::manager_run(
             &cfg,
             &ws,
             &log,
@@ -197,10 +197,10 @@ pub async fn run() -> Result<()> {
         )
         .await?;
         if !ok {
-            bail!("dry-run: planner produced invalid backlog");
+            bail!("dry-run: manager produced invalid backlog");
         }
         let bk = std::fs::read_to_string(ws.join(".agentloop/state/backlog.json"))?;
-        println!("dry-run: planned backlog ->\n{bk}");
+        println!("dry-run: managed backlog ->\n{bk}");
         return Ok(());
     }
 
