@@ -25,12 +25,18 @@ CURRENT backlog.json:
 {backlog}
 
 Your job each round:
-1. Read completed task results in .agentloop/results/ and update finished business tasks to status="done".
-2. Fold pending user requests into the business backlog.
-3. Add/split/refine business tasks so the GOAL is represented as user-visible outcomes with clear acceptance criteria.
+1. Fold pending user requests into the business backlog.
+2. Add/split/refine business tasks so the GOAL is represented as user-visible outcomes with clear acceptance criteria.
+3. Update business task sequencing, notes, readiness, blocked/failed states, and acceptance criteria as needed.
 4. The orchestrator FAILS any item once its attempts reach {max_attempts} (the max_attempts cap).
    So for any item nearing attempts={max_attempts}, reshape it into smaller business outcomes or drop it.
 5. Keep each item business-facing: describe what the user gets, not implementation details.
+
+Completion ownership:
+- Do NOT create status="done" yourself.
+- Leave customer-approved done tasks alone.
+- A task may be status="done" only when .agentloop/state/tasks/<task-id>/customer.json exists with status="approved".
+- The orchestrator marks tasks done after verify.sh passes and the customer approves.
 
 OUTPUT CONTRACT — you MUST overwrite .agentloop/state/backlog.json with valid JSON:
 {{"items":[{{"id":"task-1","title":"User-visible outcome","desc":"What the user needs","deps":[],"status":"ready","attempts":0,"acceptance":"Observable acceptance criteria"}}]}}

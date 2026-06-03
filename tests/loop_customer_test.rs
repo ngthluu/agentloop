@@ -4,6 +4,8 @@ use agentloop::events::{EventLineReporter, Reporter};
 use agentloop::{orchestrator, state};
 use std::sync::Arc;
 
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn cfg() -> Config {
     serde_json::from_str(r#"{
   "caps": { "max_iterations": 3, "max_parallel": 1, "item_timeout_sec": 30, "total_budget_sec": 300, "max_attempts": 3 },
@@ -20,6 +22,7 @@ fn cfg() -> Config {
 
 #[tokio::test]
 async fn customer_rejection_keeps_business_task_ready_with_feedback() {
+    let _env = ENV_LOCK.lock().await;
     let ws = common::init_ws_with_stub();
     let stub = r##"#!/bin/bash
 tool="$1"; shift
@@ -77,6 +80,54 @@ exit 0
             .contains("missing visible confirmation"),
         "customer feedback is preserved in notes"
     );
+    assert_eq!(state::open_count(&bk).unwrap(), 1);
+
+    std::env::remove_var("FAKE_AGENT");
+    std::env::remove_var("FAKE_AGENT_BIN");
+    std::env::remove_var("WS");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[tokio::test]
+async fn manager_written_done_without_customer_approval_does_not_complete() {
+    let _env = ENV_LOCK.lock().await;
+    let ws = common::init_ws_with_stub();
+    let stub = r##"#!/bin/bash
+tool="$1"; shift
+ws_state="$WS/.agentloop/state"
+prompt="$*"
+case "$prompt" in
+  *MANAGER*)
+    echo '{"items":[{"id":"task-1","title":"f","desc":"d","deps":[],"status":"done","attempts":0,"acceptance":"file exists"}]}' > "$ws_state/backlog.json"
+    printf '#!/bin/bash\nexit 0\n' > "$WS/.agentloop/verify.sh"; chmod +x "$WS/.agentloop/verify.sh"
+    echo "# updated" > "$ws_state/master.md"
+    ;;
+esac
+exit 0
+"##;
+    std::fs::write(ws.join("stub.sh"), stub).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ws.join("stub.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+
+    std::env::set_var("FAKE_AGENT", "1");
+    std::env::set_var("FAKE_AGENT_BIN", ws.join("stub.sh"));
+    std::env::set_var("WS", &ws);
+
+    let reporter: Arc<dyn Reporter> = Arc::new(EventLineReporter);
+    let rc = orchestrator::run(&cfg(), &ws, reporter).await.unwrap();
+
+    assert_ne!(
+        rc, 0,
+        "manager-created done without customer approval must not finish the run"
+    );
+    let bk = ws.join(".agentloop/state/backlog.json");
+    let v = state::read(&bk).unwrap();
+    let task = state::item(&v, "task-1").unwrap();
+    assert_ne!(task["status"], "done");
     assert_eq!(state::open_count(&bk).unwrap(), 1);
 
     std::env::remove_var("FAKE_AGENT");

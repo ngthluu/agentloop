@@ -195,6 +195,31 @@ fn user_blocked_business_count(bk: &Path, ws: &Path) -> Result<i64> {
     Ok(count)
 }
 
+fn reopen_unapproved_done_tasks(bk: &Path, ws: &Path) -> Result<u32> {
+    let backlog = state::read(bk)?;
+    let empty = vec![];
+    let ids: Vec<String> = backlog["items"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|item| item["status"] == "done")
+        .filter_map(|item| item["id"].as_str())
+        .filter(|id| !task_state::customer_approved(ws, id))
+        .map(str::to_string)
+        .collect();
+
+    for id in &ids {
+        state::set_status(
+            bk,
+            id,
+            "ready",
+            "done requires task-local customer approval; reopening",
+        )?;
+    }
+
+    Ok(ids.len() as u32)
+}
+
 /// One iteration: manage, architect, dispatch builders, integrate, review. Returns merged count.
 pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporter>) -> Result<u32> {
     let sdir = ws.join(".agentloop/state");
@@ -222,6 +247,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         anyhow::bail!("manager invalid");
     }
     reporter.status("manager", "done", &mtool, &mmodel);
+    let _ = reopen_unapproved_done_tasks(&bk, ws)?;
 
     let ready_business = state::ready_items(&bk, ws, usize::MAX)?;
     for id in &ready_business {
@@ -515,6 +541,7 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
         }
 
         let merged = iterate(cfg, ws, n, &reporter).await?;
+        let _ = reopen_unapproved_done_tasks(&bk, ws)?;
 
         let grc = gate(ws);
         let gate_state = if grc == 0 { "pass" } else { "fail" };
@@ -613,6 +640,7 @@ pub async fn run_interactive(
             n += 1;
             iters_this_window += 1;
             let merged = iterate(cfg, ws, n, &reporter).await?;
+            let _ = reopen_unapproved_done_tasks(&bk, ws)?;
             let grc = gate(ws);
             let gate_state = if grc == 0 { "pass" } else { "fail" };
             let open = state::open_count(&bk)?;
