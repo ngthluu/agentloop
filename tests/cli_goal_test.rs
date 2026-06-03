@@ -5,14 +5,20 @@ use agentloop::cli::resolve_goal_text;
 fn commit_goal_writes_when_fresh_and_folds_when_existing() {
     let ws = std::env::temp_dir().join(format!(
         "alcommit-{}",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
     std::fs::write(ws.join(".agentloop/state/goal.md"), "").unwrap();
 
     // Fresh + blank goal: no-op, goal.md stays empty.
     commit_goal(&ws, "   ").unwrap();
-    assert!(std::fs::read_to_string(ws.join(".agentloop/state/goal.md")).unwrap().trim().is_empty());
+    assert!(std::fs::read_to_string(ws.join(".agentloop/state/goal.md"))
+        .unwrap()
+        .trim()
+        .is_empty());
 
     // Fresh (empty goal.md): commit writes the goal directly.
     commit_goal(&ws, "build a todo app").unwrap();
@@ -37,7 +43,10 @@ fn commit_goal_writes_when_fresh_and_folds_when_existing() {
 fn goal_text_prefers_arg_then_goal_md_then_empty() {
     let ws = std::env::temp_dir().join(format!(
         "algoal-{}",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
 

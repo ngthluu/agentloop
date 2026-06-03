@@ -23,7 +23,10 @@ fn append_list_consume() {
     let p = requests::pending(&ws).unwrap();
     assert_eq!(
         p,
-        vec!["add a --due flag".to_string(), "show overdue in red".to_string()]
+        vec![
+            "add a --due flag".to_string(),
+            "show overdue in red".to_string()
+        ]
     );
 
     let block = requests::prompt_block(&ws).unwrap();

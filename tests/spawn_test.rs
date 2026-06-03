@@ -27,18 +27,30 @@ fn cfg() -> Config {
 #[test]
 fn claude_argv_injects_skip_permissions() {
     let a = spawn::build_argv(&cfg(), "manager", "HELLO").unwrap();
-    assert_eq!(a, vec![
-        "claude","-p","HELLO",
-        "--output-format","stream-json","--verbose",
-        "--model","opus","--effort","high","--dangerously-skip-permissions",
-    ]);
+    assert_eq!(
+        a,
+        vec![
+            "claude",
+            "-p",
+            "HELLO",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--model",
+            "opus",
+            "--effort",
+            "high",
+            "--dangerously-skip-permissions",
+        ]
+    );
 }
 
 // --- claude stream-json -> readable log formatting ---
 
 #[test]
 fn fmt_assistant_text() {
-    let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Replan complete."}]}}"#;
+    let line =
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Replan complete."}]}}"#;
     assert_eq!(spawn::format_claude_event(line), vec!["Replan complete."]);
 }
 
@@ -56,7 +68,10 @@ fn fmt_tool_use_edit_shows_path() {
     let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"src/spawn.rs"}}]}}"#;
     let out = spawn::format_claude_event(line);
     assert_eq!(out.len(), 1);
-    assert!(out[0].contains("Edit") && out[0].contains("src/spawn.rs"), "{out:?}");
+    assert!(
+        out[0].contains("Edit") && out[0].contains("src/spawn.rs"),
+        "{out:?}"
+    );
 }
 
 #[test]
@@ -67,13 +82,20 @@ fn fmt_result_returns_final_text() {
 
 #[test]
 fn fmt_tool_results_are_skipped() {
-    let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"huge output"}]}}"#;
-    assert!(spawn::format_claude_event(line).is_empty(), "tool_result should be skipped");
+    let line =
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"huge output"}]}}"#;
+    assert!(
+        spawn::format_claude_event(line).is_empty(),
+        "tool_result should be skipped"
+    );
 }
 
 #[test]
 fn fmt_invalid_json_passes_through() {
-    assert_eq!(spawn::format_claude_event("not json at all"), vec!["not json at all"]);
+    assert_eq!(
+        spawn::format_claude_event("not json at all"),
+        vec!["not json at all"]
+    );
 }
 
 #[test]
@@ -84,14 +106,25 @@ fn fmt_blank_line_yields_nothing() {
 #[test]
 fn codex_argv_injects_yolo() {
     let a = spawn::build_argv(&cfg(), "builder", "DOIT").unwrap();
-    assert_eq!(a, vec![
-        "codex","exec","DOIT","-m","gpt-5","-c","model_reasoning_effort=high","--yolo"
-    ]);
+    assert_eq!(
+        a,
+        vec![
+            "codex",
+            "exec",
+            "DOIT",
+            "-m",
+            "gpt-5",
+            "-c",
+            "model_reasoning_effort=high",
+            "--yolo"
+        ]
+    );
 }
 
 #[test]
 fn unknown_tool_errors() {
-    let c: Config = serde_json::from_str(r#"{"routing":{"x":{"tool":"nope"}},"defaults":{}}"#).unwrap();
+    let c: Config =
+        serde_json::from_str(r#"{"routing":{"x":{"tool":"nope"}},"defaults":{}}"#).unwrap();
     assert!(spawn::build_argv(&c, "x", "p").is_err());
 }
 
@@ -104,16 +137,33 @@ async fn fake_agent_runs_and_logs_argv() {
     std::env::remove_var("FAKE_SLEEP");
     std::env::remove_var("FAKE_EXIT");
 
-    let dir = std::env::temp_dir().join(format!("alspawn-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let dir = std::env::temp_dir().join(format!(
+        "alspawn-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let log: PathBuf = dir.join("agent.log");
 
-    let rc = spawn::agent_run(&cfg(), "manager", "HELLO", &dir, &log, Duration::from_secs(10)).await.unwrap();
+    let rc = spawn::agent_run(
+        &cfg(),
+        "manager",
+        "HELLO",
+        &dir,
+        &log,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
     assert_eq!(rc, 0);
     let logged = std::fs::read_to_string(&log).unwrap();
     assert!(logged.contains("FAKE_ARGS:"), "log: {logged}");
-    assert!(logged.contains("--model"), "real argv passed to fake: {logged}");
+    assert!(
+        logged.contains("--model"),
+        "real argv passed to fake: {logged}"
+    );
     std::env::remove_var("FAKE_AGENT");
     std::env::remove_var("FAKE_AGENT_BIN");
 }
@@ -126,12 +176,19 @@ async fn timeout_returns_124() {
     std::env::set_var("FAKE_AGENT_BIN", bin);
     std::env::set_var("FAKE_SLEEP", "10");
 
-    let dir = std::env::temp_dir().join(format!("altimeout-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let dir = std::env::temp_dir().join(format!(
+        "altimeout-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("agent.log");
 
-    let rc = spawn::agent_run(&cfg(), "manager", "P", &dir, &log, Duration::from_secs(1)).await.unwrap();
+    let rc = spawn::agent_run(&cfg(), "manager", "P", &dir, &log, Duration::from_secs(1))
+        .await
+        .unwrap();
     assert_eq!(rc, 124);
     std::env::remove_var("FAKE_AGENT");
     std::env::remove_var("FAKE_AGENT_BIN");
@@ -146,8 +203,13 @@ async fn kill_all_agents_terminates_in_flight() {
     std::env::set_var("FAKE_AGENT_BIN", bin);
     std::env::set_var("FAKE_SLEEP", "30"); // would run ~30s if not killed
 
-    let dir = std::env::temp_dir().join(format!("alkill-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let dir = std::env::temp_dir().join(format!(
+        "alkill-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("agent.log");
 
@@ -160,7 +222,9 @@ async fn kill_all_agents_terminates_in_flight() {
 
     // Wait for the agent to register its process group.
     for _ in 0..100 {
-        if spawn::active_agent_count() >= 1 { break; }
+        if spawn::active_agent_count() >= 1 {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(spawn::active_agent_count(), 1, "in-flight agent registered");

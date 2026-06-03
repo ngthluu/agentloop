@@ -2,8 +2,13 @@ use agentloop::inbox;
 use std::path::PathBuf;
 
 fn tmp_ws() -> PathBuf {
-    let ws = std::env::temp_dir().join(format!("alinbox-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let ws = std::env::temp_dir().join(format!(
+        "alinbox-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir_all(ws.join(".agentloop/questions")).unwrap();
     std::fs::create_dir_all(ws.join(".agentloop/answers")).unwrap();
     std::fs::create_dir_all(ws.join(".agentloop/logs")).unwrap();
@@ -13,8 +18,11 @@ fn tmp_ws() -> PathBuf {
 #[test]
 fn read_question_and_record_answer() {
     let ws = tmp_ws();
-    std::fs::write(ws.join(".agentloop/questions/it-1.json"),
-        r#"{"question":"SQLite or Postgres?","context":"storage layer"}"#).unwrap();
+    std::fs::write(
+        ws.join(".agentloop/questions/it-1.json"),
+        r#"{"question":"SQLite or Postgres?","context":"storage layer"}"#,
+    )
+    .unwrap();
 
     let q = inbox::read_question(&ws, "it-1").unwrap();
     assert_eq!(q.question, "SQLite or Postgres?");

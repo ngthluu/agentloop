@@ -1,5 +1,5 @@
-use crossterm::event::{KeyCode, KeyEvent};
 use crate::events::{Command, Event};
+use crossterm::event::{KeyCode, KeyEvent};
 
 #[derive(Clone)]
 pub struct Job {
@@ -82,7 +82,13 @@ impl AppState {
 
     pub fn apply(&mut self, ev: Event) {
         match ev {
-            Event::JobDispatched { id, label, tool, model, log_path } => {
+            Event::JobDispatched {
+                id,
+                label,
+                tool,
+                model,
+                log_path,
+            } => {
                 let now = std::time::Instant::now();
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
                     j.label = label;
@@ -107,19 +113,35 @@ impl AppState {
             }
             Event::JobStatus { id, status } => {
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
-                    let terminal = matches!(status.as_str(), "merged" | "done" | "failed" | "bounced");
+                    let terminal =
+                        matches!(status.as_str(), "merged" | "done" | "failed" | "bounced");
                     if terminal && j.frozen.is_none() {
                         j.frozen = j.started.map(|s| s.elapsed());
                     }
                     j.status = status;
                 }
             }
-            Event::QuestionRaised { item_id, label, text, context } => {
+            Event::QuestionRaised {
+                item_id,
+                label,
+                text,
+                context,
+            } => {
                 if !self.inbox.iter().any(|p| p.item_id == item_id) {
-                    self.inbox.push(Pending { item_id, label, text, context });
+                    self.inbox.push(Pending {
+                        item_id,
+                        label,
+                        text,
+                        context,
+                    });
                 }
             }
-            Event::Iteration { n, merged: _, gate, open } => {
+            Event::Iteration {
+                n,
+                merged: _,
+                gate,
+                open,
+            } => {
                 self.iter = n;
                 self.gate = gate;
                 self.open = open;
@@ -142,7 +164,9 @@ impl AppState {
 
     fn is_newline(k: &KeyEvent) -> bool {
         k.code == KeyCode::Enter
-            && k.modifiers.intersects(crossterm::event::KeyModifiers::SHIFT | crossterm::event::KeyModifiers::ALT)
+            && k.modifiers.intersects(
+                crossterm::event::KeyModifiers::SHIFT | crossterm::event::KeyModifiers::ALT,
+            )
     }
 
     fn on_key_goal_entry(&mut self, k: KeyEvent) -> Option<Command> {
@@ -297,7 +321,10 @@ impl AppState {
             let p = self.inbox.remove(idx);
             self.selected = 0;
             self.input.clear();
-            Some(Command::AnswerQuestion { item_id: p.item_id, text })
+            Some(Command::AnswerQuestion {
+                item_id: p.item_id,
+                text,
+            })
         } else {
             self.input.clear();
             Some(Command::AddTask { request: text })
@@ -429,16 +456,30 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
     let status_text = if s.standby {
         format!(
             " ✓ DONE · standby  │  {}  │  iter {}  │  gate: {}  │  open: {}  │  ❓{}  │  ⏱ {}",
-            s.goal, s.iter, s.gate, s.open, s.inbox.len(), total
+            s.goal,
+            s.iter,
+            s.gate,
+            s.open,
+            s.inbox.len(),
+            total
         )
     } else {
         format!(
             " {}  │  iter {}  │  gate: {}  │  open: {}  │  ❓{}  │  ⏱ {}",
-            s.goal, s.iter, s.gate, s.open, s.inbox.len(), total
+            s.goal,
+            s.iter,
+            s.gate,
+            s.open,
+            s.inbox.len(),
+            total
         )
     };
-    let status_bar = Paragraph::new(status_text)
-        .style(Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD));
+    let status_bar = Paragraph::new(status_text).style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_widget(status_bar, chunks[0]);
 
     // --- Main area: jobs (top) + inbox (bottom), or the job-detail view ---
@@ -459,14 +500,20 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
                 let dur = j.elapsed().map(fmt_elapsed).unwrap_or_default();
                 let line = format!(" {} {} [{}/{}]  {}", glyph, j.label, j.tool, j.model, dur);
                 let style = if s.focus_is_jobs() && i == s.selected_job {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 ListItem::new(Line::from(line)).style(style)
             })
             .collect();
-        let jobs_border = if s.focus_is_jobs() { Color::Yellow } else { Color::Blue };
+        let jobs_border = if s.focus_is_jobs() {
+            Color::Yellow
+        } else {
+            Color::Blue
+        };
         let jobs_list = List::new(job_items).block(
             Block::default()
                 .title(" Jobs ")
@@ -481,14 +528,24 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
             .enumerate()
             .map(|(i, p)| {
                 let style = if !s.focus_is_jobs() && i == s.selected {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
-                ListItem::new(Line::from(format!(" \u{2753} {} \u{2014} {}", p.label, p.text))).style(style)
+                ListItem::new(Line::from(format!(
+                    " \u{2753} {} \u{2014} {}",
+                    p.label, p.text
+                )))
+                .style(style)
             })
             .collect();
-        let inbox_border = if s.focus_is_jobs() { Color::Magenta } else { Color::Yellow };
+        let inbox_border = if s.focus_is_jobs() {
+            Color::Magenta
+        } else {
+            Color::Yellow
+        };
         let inbox_list = List::new(inbox_items).block(
             Block::default()
                 .title(" Inbox ")
@@ -522,8 +579,7 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
     } else {
         " [enter] submit  [shift+enter] newline  [tab] pane  [↑↓] nav  [esc] clear  [q] quit"
     };
-    let hint_para = Paragraph::new(Line::from(hint))
-        .style(Style::default().fg(Color::DarkGray));
+    let hint_para = Paragraph::new(Line::from(hint)).style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint_para, fchunks[1]);
 }
 
@@ -547,7 +603,11 @@ fn render_goal_entry(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout
     let title = Paragraph::new(Line::from(
         " Describe what to build — or edit the goal below, then Continue:",
     ))
-    .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_widget(title, chunks[1]);
 
     let input = Paragraph::new(s.input_buffer())
@@ -561,13 +621,24 @@ fn render_goal_entry(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout
     f.render_widget(input, chunks[2]);
 
     let button_style = if s.goal_continue_focused() {
-        Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(Color::Green)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
     };
-    let button = Paragraph::new(Line::from("  [ Continue ]   ([enter] start  ·  [shift+enter] newline  ·  [ctrl-c] quit)"))
-        .style(button_style)
-        .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::DarkGray)));
+    let button = Paragraph::new(Line::from(
+        "  [ Continue ]   ([enter] start  ·  [shift+enter] newline  ·  [ctrl-c] quit)",
+    ))
+    .style(button_style)
+    .block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
     f.render_widget(button, chunks[3]);
 }
 
@@ -590,7 +661,11 @@ fn render_job_detail(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout
                 format!(" Job: {} \u{2014} {} ", j.id, j.label),
                 vec![Line::from(format!(
                     " status: {} {}   tool: {}/{}   {}",
-                    status_glyph(&j.status), j.status, j.tool, j.model, dur
+                    status_glyph(&j.status),
+                    j.status,
+                    j.tool,
+                    j.model,
+                    dur
                 ))],
             )
         }
