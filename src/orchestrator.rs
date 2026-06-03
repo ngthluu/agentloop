@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::events::{Command, Reporter};
 use crate::worktree::MergeOutcome;
-use crate::{planner, spawn, state, worker, worktree};
+use crate::{architect, customer, manager, spawn, state, task_state, worker, worktree};
 
 /// An effectively-infinite timeout. The resolver is unbounded (no wall-clock cap) per
 /// design, but is still registered in ACTIVE_PGIDS by the spawn layer, so quitting the
@@ -33,7 +33,13 @@ async fn resolve_conflict(
     let model = cfg.role_field(&rrole, "model").unwrap_or_default();
     let rid = format!("resolve-{id}");
     let log = ws.join(format!(".agentloop/logs/iter-{n}/{rid}.log"));
-    reporter.dispatch(&rid, &format!("resolve merge conflict — {label}"), &tool, &model, Some(&log));
+    reporter.dispatch(
+        &rid,
+        &format!("resolve merge conflict — {label}"),
+        &tool,
+        &model,
+        Some(&log),
+    );
 
     let prompt = worker::resolver_prompt(ws, item);
     // Unbounded: run in the main workspace with no effective timeout.
@@ -88,7 +94,108 @@ pub fn gate(ws: &Path) -> i32 {
     }
 }
 
-/// One iteration: plan, select, dispatch in parallel, integrate. Returns merged count.
+fn builder_owner(ws: &Path, builder_id: &str) -> Result<Option<String>> {
+    let tasks_dir = ws.join(".agentloop/state/tasks");
+    let Ok(entries) = std::fs::read_dir(&tasks_dir) else {
+        return Ok(None);
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let task_id = entry.file_name().to_string_lossy().to_string();
+        let Ok(builders) = task_state::read_builders(ws, &task_id) else {
+            continue;
+        };
+        if task_state::item(&builders, builder_id).is_some() {
+            return Ok(Some(task_id));
+        }
+    }
+    Ok(None)
+}
+
+fn builder_item(ws: &Path, task_id: &str, builder_id: &str) -> Result<Option<Value>> {
+    let builders = task_state::read_builders(ws, task_id)?;
+    Ok(task_state::item(&builders, builder_id).cloned())
+}
+
+fn active_business_ids(bk: &Path, ws: &Path) -> Result<Vec<String>> {
+    let backlog = state::read(bk)?;
+    let ready: std::collections::HashSet<String> = state::ready_items(bk, ws, usize::MAX)?
+        .into_iter()
+        .collect();
+    let empty = vec![];
+    Ok(backlog["items"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter_map(|item| {
+            let id = item["id"].as_str()?;
+            match item["status"].as_str() {
+                Some("in_progress") => Some(id.to_string()),
+                Some("ready") if ready.contains(id) => Some(id.to_string()),
+                _ => None,
+            }
+        })
+        .collect())
+}
+
+fn customer_feedback(ws: &Path, task_id: &str) -> String {
+    std::fs::read_to_string(task_state::customer_path(ws, task_id))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|v| {
+            v.get("acceptance_notes")
+                .or_else(|| v.get("summary"))
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "customer rejected the completed task".to_string())
+}
+
+fn task_blocked_on_builder_question(ws: &Path, task_id: &str) -> Result<bool> {
+    let builders = match task_state::read_builders(ws, task_id) {
+        Ok(builders) => builders,
+        Err(_) => return Ok(false),
+    };
+    let empty = vec![];
+    let has_question = builders["items"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|item| item["status"] == "blocked")
+        .filter_map(|item| item["id"].as_str())
+        .any(|id| crate::inbox::has_question(ws, id));
+    Ok(has_question && task_state::ready_builders(ws, task_id, 1)?.is_empty())
+}
+
+fn user_blocked_business_count(bk: &Path, ws: &Path) -> Result<i64> {
+    let backlog = state::read(bk)?;
+    let empty = vec![];
+    let mut count = 0i64;
+    for item in backlog["items"].as_array().unwrap_or(&empty) {
+        if !matches!(
+            item["status"].as_str(),
+            Some("ready") | Some("in_progress") | Some("blocked")
+        ) {
+            continue;
+        }
+        let Some(id) = item["id"].as_str() else {
+            continue;
+        };
+        if item["status"] == "blocked" && crate::inbox::has_question(ws, id) {
+            count += 1;
+        } else if task_blocked_on_builder_question(ws, id)? {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// One iteration: manage, architect, dispatch builders, integrate, review. Returns merged count.
 pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporter>) -> Result<u32> {
     let sdir = ws.join(".agentloop/state");
     let ldir = ws.join(format!(".agentloop/logs/iter-{n}"));
@@ -99,92 +206,140 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     let maxpar = cfg.max_parallel() as usize;
     let maxatt = cfg.max_attempts();
 
-    // Planner (tracked, awaited).
-    let prole = cfg.resolve_role("planner").unwrap_or_default();
-    let ptool = cfg.role_field(&prole, "tool").unwrap_or_default();
-    let pmodel = cfg.role_field(&prole, "model").unwrap_or_default();
-    reporter.dispatch("planner", "planning", &ptool, &pmodel, Some(&ldir.join("planner.log")));
-    let ok = planner::planner_run(cfg, ws, &ldir.join("planner.log"), itimeout).await?;
+    let mrole = cfg.resolve_role("manager").unwrap_or_default();
+    let mtool = cfg.role_field(&mrole, "tool").unwrap_or_default();
+    let mmodel = cfg.role_field(&mrole, "model").unwrap_or_default();
+    reporter.dispatch(
+        "manager",
+        "managing",
+        &mtool,
+        &mmodel,
+        Some(&ldir.join("manager.log")),
+    );
+    let ok = manager::manager_run(cfg, ws, &ldir.join("manager.log"), itimeout).await?;
     if !ok {
-        eprintln!("planner failed/invalid");
-        anyhow::bail!("planner invalid");
+        eprintln!("manager failed/invalid");
+        anyhow::bail!("manager invalid");
     }
-    reporter.status("planner", "done", &ptool, &pmodel);
+    reporter.status("manager", "done", &mtool, &mmodel);
 
-    let ready = state::ready_items(&bk, ws, maxpar)?;
-    if ready.is_empty() {
-        return Ok(0);
-    }
-
-    // Dispatch each ready item in its own worktree, concurrently.
-    let mut handles = Vec::new();
-    let mut dispatched: Vec<String> = Vec::new();
-    for id in ready {
-        let v = state::read(&bk)?;
-        let item = match state::item(&v, &id) {
-            Some(i) => i.clone(),
-            None => continue,
+    let ready_business = state::ready_items(&bk, ws, usize::MAX)?;
+    for id in &ready_business {
+        if task_state::builder_plan_valid(ws, id) {
+            continue;
+        }
+        let backlog = state::read(&bk)?;
+        let Some(task) = state::item(&backlog, id).cloned() else {
+            continue;
         };
-        let att = item
-            .get("attempts")
-            .and_then(|a| a.as_u64())
-            .unwrap_or(0) as u32;
-        if att >= maxatt {
-            state::set_status(
-                &bk,
-                &id,
-                "failed",
-                &format!("exceeded max_attempts ({maxatt})"),
-            )?;
-            continue;
-        }
-        let wt = ws.join(format!(".agentloop/worktrees/{id}"));
-        let _ = std::fs::remove_dir_all(&wt);
-        worktree::remove(ws, &wt, &format!("item/{id}"));
-        if worktree::create(ws, &format!("item/{id}"), &wt).is_err() {
-            state::set_status(&bk, &id, "failed", "worktree create failed")?;
-            continue;
-        }
-        state::set_status(&bk, &id, "in_progress", "")?;
-        state::increment_attempts(&bk, &id)?;
 
-        let role = item["role"].as_str().unwrap_or("build").to_string();
-        let rrole = cfg.resolve_role(&role).unwrap_or_default();
-        let tool = cfg.role_field(&rrole, "tool").unwrap_or_default();
-        let model = cfg.role_field(&rrole, "model").unwrap_or_default();
-        let label = item["title"].as_str().unwrap_or("").to_string();
-        let log = ldir.join(format!("item-{id}.log"));
-        reporter.dispatch(&id, &label, &tool, &model, Some(&log));
-
-        let cfg2 = cfg.clone();
-        let ws2 = ws.to_path_buf();
-        let item2: Value = item.clone();
-        let id2 = id.clone();
-        handles.push(tokio::spawn(async move {
-            if let Err(e) = worker::worker_dispatch(&cfg2, &ws2, &item2, &wt, &log, itimeout).await {
-                eprintln!("worker {id2} dispatch error: {e:#}");
-            }
-            id2
-        }));
-        dispatched.push(id);
+        let arole = cfg.resolve_role("architect").unwrap_or_default();
+        let atool = cfg.role_field(&arole, "tool").unwrap_or_default();
+        let amodel = cfg.role_field(&arole, "model").unwrap_or_default();
+        let aid = format!("architect-{id}");
+        let label = format!("architect {}", task["title"].as_str().unwrap_or(""));
+        let log = ldir.join(format!("{aid}.log"));
+        reporter.dispatch(&aid, &label, &atool, &amodel, Some(&log));
+        let ok = architect::architect_run(cfg, ws, &task, &log, itimeout).await?;
+        if ok && task_state::builder_plan_valid(ws, id) {
+            state::set_status(&bk, id, "in_progress", "")?;
+            reporter.status(&aid, "done", &atool, &amodel);
+        } else {
+            state::set_status(&bk, id, "ready", "architect produced invalid task plan")?;
+            reporter.status(&aid, "failed", &atool, &amodel);
+        }
     }
 
-    // Await all workers. A panicked worker task surfaces here; its missing result
+    let mut handles = Vec::new();
+    let mut dispatched: Vec<(String, String)> = Vec::new();
+    let active = active_business_ids(&bk, ws)?;
+    for task_id in &active {
+        if !task_state::builder_plan_valid(ws, task_id) {
+            continue;
+        }
+        state::set_status(&bk, task_id, "in_progress", "")?;
+        let remaining = maxpar.saturating_sub(dispatched.len());
+        if remaining == 0 {
+            break;
+        }
+        for id in task_state::ready_builders(ws, task_id, remaining)? {
+            let Some(item) = builder_item(ws, task_id, &id)? else {
+                continue;
+            };
+            let att = item.get("attempts").and_then(|a| a.as_u64()).unwrap_or(0) as u32;
+            if att >= maxatt {
+                task_state::set_builder_status(
+                    ws,
+                    task_id,
+                    &id,
+                    "failed",
+                    &format!("exceeded max_attempts ({maxatt})"),
+                )?;
+                continue;
+            }
+            let backlog = state::read(&bk)?;
+            let Some(parent) = state::item(&backlog, task_id).cloned() else {
+                continue;
+            };
+            let wt = ws.join(format!(".agentloop/worktrees/{id}"));
+            let _ = std::fs::remove_dir_all(&wt);
+            worktree::remove(ws, &wt, &format!("item/{id}"));
+            if worktree::create(ws, &format!("item/{id}"), &wt).is_err() {
+                task_state::set_builder_status(
+                    ws,
+                    task_id,
+                    &id,
+                    "failed",
+                    "worktree create failed",
+                )?;
+                continue;
+            }
+            task_state::set_builder_status(ws, task_id, &id, "in_progress", "")?;
+            task_state::increment_builder_attempts(ws, task_id, &id)?;
+
+            let rrole = cfg.resolve_role("builder").unwrap_or_default();
+            let tool = cfg.role_field(&rrole, "tool").unwrap_or_default();
+            let model = cfg.role_field(&rrole, "model").unwrap_or_default();
+            let label = item["title"].as_str().unwrap_or("").to_string();
+            let log = ldir.join(format!("item-{id}.log"));
+            reporter.dispatch(&id, &label, &tool, &model, Some(&log));
+
+            let cfg2 = cfg.clone();
+            let ws2 = ws.to_path_buf();
+            let item2: Value = item.clone();
+            let id2 = id.clone();
+            handles.push(tokio::spawn(async move {
+                if let Err(e) =
+                    worker::builder_dispatch(&cfg2, &ws2, &parent, &item2, &wt, &log, itimeout)
+                        .await
+                {
+                    eprintln!("builder {id2} dispatch error: {e:#}");
+                }
+                id2
+            }));
+            dispatched.push((task_id.clone(), id));
+        }
+    }
+
+    // Await all builders. A panicked builder task surfaces here; its missing result
     // file then bounces the item back to ready during integration.
     for h in handles {
         if let Err(e) = h.await {
-            eprintln!("worker task panicked: {e}");
+            eprintln!("builder task panicked: {e}");
         }
     }
 
-    // Integrate sequentially based on each worker's result file.
+    // Integrate sequentially based on each builder's result file.
     let mut merged = 0u32;
-    for id in &dispatched {
+    for (task_id, id) in &dispatched {
         let rfile = ws.join(format!(".agentloop/results/{id}.json"));
         let result_value: Option<Value> = std::fs::read_to_string(&rfile)
             .ok()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok());
-        let status = result_value.as_ref().map(|v| v["status"].clone()).unwrap_or(Value::Null);
+        let status = result_value
+            .as_ref()
+            .map(|v| v["status"].clone())
+            .unwrap_or(Value::Null);
         let branch = format!("item/{id}");
 
         if status == "needs_input" {
@@ -192,17 +347,23 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             // item; do not merge. The question file lives in the main workspace
             // (.agentloop/questions/<id>.json), so it survives worktree removal.
             if let Ok(q) = crate::inbox::read_question(ws, id) {
-                let label = state::read(&bk)
+                let label = builder_item(ws, task_id, id)
                     .ok()
+                    .flatten()
                     .as_ref()
-                    .and_then(|v| state::item(v, id))
                     .and_then(|i| i["title"].as_str().map(String::from))
                     .unwrap_or_default();
                 reporter.question(id, &label, &q.question, &q.context);
-                state::set_status(&bk, id, "blocked", &q.question)?;
+                task_state::set_builder_status(ws, task_id, id, "blocked", &q.question)?;
             } else {
                 // Malformed/missing question file: treat as a normal non-done bounce.
-                state::set_status(&bk, id, "ready", "needs_input without a question file")?;
+                task_state::set_builder_status(
+                    ws,
+                    task_id,
+                    id,
+                    "ready",
+                    "needs_input without a question file",
+                )?;
                 reporter.status(id, "bounced", "", "");
             }
             worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
@@ -213,51 +374,92 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         let result_done = status == "done";
         if result_done {
             if !worktree::has_commits_ahead(ws, &branch) {
-                state::set_status(&bk, id, "ready", "worker reported done but made no commits")?;
+                task_state::set_builder_status(
+                    ws,
+                    task_id,
+                    id,
+                    "ready",
+                    "builder reported done but made no commits",
+                )?;
                 reporter.status(id, "bounced", "", "");
             } else {
                 match worktree::merge_or_conflict(ws, &branch)? {
                     MergeOutcome::Merged => {
-                        state::set_status(&bk, id, "done", "")?;
+                        task_state::set_builder_status(ws, task_id, id, "done", "")?;
                         reporter.status(id, "merged", "", "");
                         merged += 1;
                     }
                     MergeOutcome::Conflict => {
-                        let (label, item_v) = state::read(&bk)
-                            .ok()
-                            .map(|v| {
-                                let it = state::item(&v, id).cloned();
-                                let label = it
-                                    .as_ref()
-                                    .and_then(|i| i["title"].as_str().map(String::from))
-                                    .unwrap_or_default();
-                                (label, it.unwrap_or(Value::Null))
-                            })
-                            .unwrap_or_default();
-                        if resolve_conflict(cfg, ws, id, &label, &item_v, &branch, n, reporter).await? {
-                            state::set_status(&bk, id, "done", "")?;
+                        let item_v = builder_item(ws, task_id, id)?.unwrap_or(Value::Null);
+                        let label = item_v["title"].as_str().unwrap_or("").to_string();
+                        if resolve_conflict(cfg, ws, id, &label, &item_v, &branch, n, reporter)
+                            .await?
+                        {
+                            task_state::set_builder_status(ws, task_id, id, "done", "")?;
                             reporter.status(id, "merged", "", "");
                             merged += 1;
                         } else {
                             // The resolver itself is unbounded (it never consumes an
                             // attempt). But a failed resolve bounces the item back to
-                            // `ready`, so the next WORKER re-dispatch consumes an attempt
+                            // `ready`, so the next builder re-dispatch consumes an attempt
                             // — that bound is deliberate, so a perpetually-conflicting
                             // item can't loop forever.
                             worktree::abort_merge(ws);
-                            state::set_status(&bk, id, "ready", "merge conflict; resolver failed")?;
+                            task_state::set_builder_status(
+                                ws,
+                                task_id,
+                                id,
+                                "ready",
+                                "merge conflict; resolver failed",
+                            )?;
                             reporter.status(id, "bounced", "", "");
                         }
                     }
                 }
             }
         } else {
-            state::set_status(&bk, id, "ready", "worker did not report done")?;
+            task_state::set_builder_status(
+                ws,
+                task_id,
+                id,
+                "ready",
+                "builder did not report done",
+            )?;
             reporter.status(id, "failed", "", "");
         }
         worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
         let _ = std::fs::remove_file(&rfile);
     }
+
+    for task_id in active_business_ids(&bk, ws)? {
+        if !task_state::builder_plan_valid(ws, &task_id)
+            || !task_state::all_builders_done(ws, &task_id)?
+        {
+            continue;
+        }
+        if gate(ws) != 0 {
+            continue;
+        }
+        let backlog = state::read(&bk)?;
+        let Some(task) = state::item(&backlog, &task_id).cloned() else {
+            continue;
+        };
+        let crole = cfg.resolve_role("customer").unwrap_or_default();
+        let ctool = cfg.role_field(&crole, "tool").unwrap_or_default();
+        let cmodel = cfg.role_field(&crole, "model").unwrap_or_default();
+        let cid = format!("{task_id}-customer");
+        let log = ldir.join(format!("{cid}.log"));
+        reporter.dispatch(&cid, "customer review", &ctool, &cmodel, Some(&log));
+        if customer::customer_run(cfg, ws, &task, &log, itimeout).await? {
+            state::set_status(&bk, &task_id, "done", "")?;
+            reporter.status(&cid, "approved", &ctool, &cmodel);
+        } else {
+            let feedback = customer_feedback(ws, &task_id);
+            state::set_status(&bk, &task_id, "ready", &feedback)?;
+            reporter.status(&cid, "rejected", &ctool, &cmodel);
+        }
+    }
+
     Ok(merged)
 }
 
@@ -265,6 +467,19 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
 /// flip the item blocked->ready so it is re-dispatched with the prior Q&A.
 pub fn apply_answer(ws: &Path, item_id: &str, text: &str) -> Result<()> {
     let bk = ws.join(".agentloop/state/backlog.json");
+    if let Some(task_id) = builder_owner(ws, item_id)? {
+        let question = match crate::inbox::read_question(ws, item_id) {
+            Ok(q) => q.question,
+            Err(_) => builder_item(ws, &task_id, item_id)?
+                .and_then(|i| i["notes"].as_str().map(String::from))
+                .unwrap_or_default(),
+        };
+        crate::inbox::record_answer(ws, item_id, &question, text)?;
+        let _ = crate::inbox::consume_question(ws, item_id);
+        task_state::set_builder_status(ws, &task_id, item_id, "ready", "answered; re-dispatching")?;
+        return Ok(());
+    }
+
     // The question text: prefer the live question file; fall back to the item's notes
     // (where the needs_input handler stashed it) if the file was already consumed.
     let question = match crate::inbox::read_question(ws, item_id) {
@@ -311,9 +526,9 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
             return Ok(0);
         }
 
-        // Only a genuine user-question block (not a planner dependency-block, which
+        // Only a genuine user-question block (not a manager dependency-block, which
         // ready_items now dispatches autonomously) should halt a headless run.
-        let user_blocked = state::user_blocked_count(&bk, ws)?;
+        let user_blocked = user_blocked_business_count(&bk, ws)?;
         if open > 0 && open == user_blocked {
             eprintln!("STOP: blocked on user input (headless)");
             return Ok(1);
@@ -350,11 +565,11 @@ pub async fn run_interactive(
     let mut n = 0u32;
     let mut stalls = 0u32;
     let mut prev_gate = String::from("init");
-    let mut window_start = Instant::now();   // budget window; reset on re-engage
-    let mut iters_this_window = 0u32;        // max_iterations is per-engagement
+    let mut window_start = Instant::now(); // budget window; reset on re-engage
+    let mut iters_this_window = 0u32; // max_iterations is per-engagement
 
     // Wait for the TUI to commit a goal (the goal-entry screen) before doing any work.
-    // Nothing — no planner, no workers — runs until StartRun arrives.
+    // Nothing — no manager, no builders — runs until StartRun arrives.
     loop {
         match crx.recv().await {
             None | Some(Command::Quit) => return Ok(0),
@@ -376,14 +591,24 @@ pub async fn run_interactive(
             while let Ok(cmd) = crx.try_recv() {
                 match cmd {
                     Command::Quit => return Ok(0),
-                    Command::AnswerQuestion { item_id, text } => { let _ = apply_answer(ws, &item_id, &text); }
-                    Command::AddTask { request } => { let _ = crate::requests::append(ws, &request); }
+                    Command::AnswerQuestion { item_id, text } => {
+                        let _ = apply_answer(ws, &item_id, &text);
+                    }
+                    Command::AddTask { request } => {
+                        let _ = crate::requests::append(ws, &request);
+                    }
                     Command::StartRun { .. } => {}
                 }
             }
 
-            if iters_this_window >= maxit { eprintln!("STOP(window): max_iterations"); break 'working true; }
-            if window_start.elapsed() >= budget { eprintln!("STOP(window): budget"); break 'working true; }
+            if iters_this_window >= maxit {
+                eprintln!("STOP(window): max_iterations");
+                break 'working true;
+            }
+            if window_start.elapsed() >= budget {
+                eprintln!("STOP(window): budget");
+                break 'working true;
+            }
 
             n += 1;
             iters_this_window += 1;
@@ -391,18 +616,24 @@ pub async fn run_interactive(
             let grc = gate(ws);
             let gate_state = if grc == 0 { "pass" } else { "fail" };
             let open = state::open_count(&bk)?;
-            let user_blocked = state::user_blocked_count(&bk, ws)?;
+            let user_blocked = user_blocked_business_count(&bk, ws)?;
             reporter.iteration(n, merged, gate_state, open);
 
-            if gate_state == "pass" && open == 0 { break 'working true; }
+            if gate_state == "pass" && open == 0 {
+                break 'working true;
+            }
 
             // Only user-question blocks remain (dependency-blocks are dispatched by
             // ready_items): block for a command (answer/add-task/quit).
             if open > 0 && open == user_blocked {
                 match crx.recv().await {
                     None | Some(Command::Quit) => return Ok(0),
-                    Some(Command::AnswerQuestion { item_id, text }) => { let _ = apply_answer(ws, &item_id, &text); }
-                    Some(Command::AddTask { request }) => { let _ = crate::requests::append(ws, &request); }
+                    Some(Command::AnswerQuestion { item_id, text }) => {
+                        let _ = apply_answer(ws, &item_id, &text);
+                    }
+                    Some(Command::AddTask { request }) => {
+                        let _ = crate::requests::append(ws, &request);
+                    }
                     Some(Command::StartRun { .. }) => {}
                 }
                 stalls = 0;
@@ -412,8 +643,13 @@ pub async fn run_interactive(
 
             if merged == 0 && gate_state == prev_gate {
                 stalls += 1;
-                if stalls >= 2 { eprintln!("STOP: no progress (stall)"); break 'working true; }
-            } else { stalls = 0; }
+                if stalls >= 2 {
+                    eprintln!("STOP: no progress (stall)");
+                    break 'working true;
+                }
+            } else {
+                stalls = 0;
+            }
             prev_gate = gate_state.to_string();
         };
 
@@ -422,8 +658,12 @@ pub async fn run_interactive(
             reporter.standby();
             match crx.recv().await {
                 None | Some(Command::Quit) => return Ok(0),
-                Some(Command::AnswerQuestion { item_id, text }) => { let _ = apply_answer(ws, &item_id, &text); }
-                Some(Command::AddTask { request }) => { let _ = crate::requests::append(ws, &request); }
+                Some(Command::AnswerQuestion { item_id, text }) => {
+                    let _ = apply_answer(ws, &item_id, &text);
+                }
+                Some(Command::AddTask { request }) => {
+                    let _ = crate::requests::append(ws, &request);
+                }
                 Some(Command::StartRun { .. }) => {}
             }
             // Re-engage: fresh budget window + iteration allowance, reset stall.

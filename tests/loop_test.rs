@@ -8,14 +8,18 @@ use std::sync::Arc;
 async fn loop_runs_to_done() {
     let ws = common::init_ws_with_stub();
 
-    let cfg: Config = serde_yaml::from_str(
-        r#"
-caps: { max_iterations: 5, max_parallel: 2, item_timeout_sec: 30, total_budget_sec: 300, max_attempts: 3 }
-routing:
-  planner: { tool: claude, model: opus, effort: high, flags: "" }
-  build:   { tool: codex,  model: gpt-5, effort: high, flags: "" }
-defaults: { role: build }
-"#,
+    let cfg: Config = serde_json::from_str(
+        r#"{
+  "caps": { "max_iterations": 5, "max_parallel": 2, "item_timeout_sec": 30, "total_budget_sec": 300, "max_attempts": 3 },
+  "routing": {
+    "manager": { "tool": "claude", "model": "opus", "effort": "high" },
+    "architect": { "tool": "claude", "model": "opus", "effort": "high" },
+    "builder": { "tool": "codex", "model": "gpt-5", "effort": "high" },
+    "customer": { "tool": "claude", "model": "sonnet", "effort": "medium" },
+    "resolver": { "tool": "claude", "model": "sonnet", "effort": "medium" }
+  },
+  "defaults": { "role": "builder" }
+}"#,
     )
     .unwrap();
 
@@ -27,9 +31,7 @@ defaults: { role: build }
     let rc = orchestrator::run(&cfg, &ws, reporter).await.unwrap();
     assert_eq!(rc, 0, "loop reports DONE");
     assert_eq!(
-        std::fs::read_to_string(ws.join("made.txt"))
-            .unwrap()
-            .trim(),
+        std::fs::read_to_string(ws.join("made.txt")).unwrap().trim(),
         "made"
     );
     assert_eq!(
