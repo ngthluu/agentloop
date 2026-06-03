@@ -156,6 +156,25 @@ fn customer_feedback(ws: &Path, task_id: &str) -> String {
         .unwrap_or_else(|| "customer rejected the completed task".to_string())
 }
 
+fn clear_customer_review(ws: &Path, task_id: &str) {
+    let _ = std::fs::remove_file(task_state::customer_path(ws, task_id));
+    let _ = std::fs::remove_file(
+        ws.join(".agentloop/results")
+            .join(format!("{task_id}-customer.json")),
+    );
+}
+
+fn invalidate_task_plan(ws: &Path, task_id: &str) {
+    let _ = std::fs::remove_file(task_state::builders_path(ws, task_id));
+    clear_customer_review(ws, task_id);
+}
+
+fn reopen_parent_for_redesign(bk: &Path, ws: &Path, task_id: &str, note: &str) -> Result<()> {
+    state::set_status(bk, task_id, "ready", note)?;
+    invalidate_task_plan(ws, task_id);
+    Ok(())
+}
+
 fn task_blocked_on_builder_question(ws: &Path, task_id: &str) -> Result<bool> {
     let builders = match task_state::read_builders(ws, task_id) {
         Ok(builders) => builders,
@@ -301,7 +320,13 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "failed",
                     &format!("exceeded max_attempts ({maxatt})"),
                 )?;
-                continue;
+                reopen_parent_for_redesign(
+                    &bk,
+                    ws,
+                    task_id,
+                    &format!("builder {id} exceeded max_attempts ({maxatt}); redesign required"),
+                )?;
+                break;
             }
             let backlog = state::read(&bk)?;
             let Some(parent) = state::item(&backlog, task_id).cloned() else {
@@ -318,7 +343,13 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "failed",
                     "worktree create failed",
                 )?;
-                continue;
+                reopen_parent_for_redesign(
+                    &bk,
+                    ws,
+                    task_id,
+                    &format!("builder {id} failed before dispatch: worktree create failed"),
+                )?;
+                break;
             }
             task_state::set_builder_status(ws, task_id, &id, "in_progress", "")?;
             task_state::increment_builder_attempts(ws, task_id, &id)?;
@@ -481,7 +512,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             reporter.status(&cid, "approved", &ctool, &cmodel);
         } else {
             let feedback = customer_feedback(ws, &task_id);
-            state::set_status(&bk, &task_id, "ready", &feedback)?;
+            reopen_parent_for_redesign(&bk, ws, &task_id, &feedback)?;
             reporter.status(&cid, "rejected", &ctool, &cmodel);
         }
     }

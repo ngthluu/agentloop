@@ -54,6 +54,19 @@ pub async fn customer_run(
     log: &Path,
     t: Duration,
 ) -> Result<bool> {
+    let id = task["id"].as_str().unwrap_or("");
+    if !id.is_empty() {
+        let _ = std::fs::remove_file(
+            ws.join(".agentloop/state/tasks")
+                .join(id)
+                .join("customer.json"),
+        );
+        let _ = std::fs::remove_file(
+            ws.join(".agentloop/results")
+                .join(format!("{id}-customer.json")),
+        );
+    }
+
     let prompt = customer_prompt(ws, task);
     spawn::agent_run(cfg, "customer", &prompt, ws, log, t).await?;
     if customer_output_approved(ws, task) {
