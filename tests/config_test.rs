@@ -4,48 +4,87 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static CFG_CTR: AtomicU32 = AtomicU32::new(0);
 
-fn write_cfg(body: &str) -> tempfile_path::TempCfg {
+fn temp_path(name: &str) -> std::path::PathBuf {
     let n = CFG_CTR.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("alcfg-{}-{}", std::process::id(), n));
-    std::fs::create_dir_all(&dir).unwrap();
-    let p = dir.join("config.yaml");
+    std::env::temp_dir()
+        .join(format!("alcfg-{}-{}", std::process::id(), n))
+        .join(name)
+}
+
+fn write_cfg(name: &str, body: &str) -> std::path::PathBuf {
+    let p = temp_path(name);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     let mut f = std::fs::File::create(&p).unwrap();
     f.write_all(body.as_bytes()).unwrap();
-    tempfile_path::TempCfg { path: p }
+    p
 }
 
-mod tempfile_path {
-    pub struct TempCfg { pub path: std::path::PathBuf }
+const SAMPLE_JSON: &str = r#"
+{
+  "caps": {
+    "max_iterations": 7,
+    "max_parallel": 2,
+    "item_timeout_sec": 30,
+    "total_budget_sec": 300,
+    "max_attempts": 3
+  },
+  "routing": {
+    "manager": { "tool": "claude", "model": "opus", "effort": "high" },
+    "builder": { "tool": "codex", "model": "gpt-5", "effort": "high" }
+  },
+  "defaults": { "role": "builder" }
 }
-
-const SAMPLE: &str = r#"
-caps: { max_iterations: 7, max_parallel: 2, item_timeout_sec: 30, total_budget_sec: 300, max_attempts: 3 }
-routing:
-  planner: { tool: claude, model: opus, effort: high, flags: "--dangerously-skip-permissions" }
-  build:   { tool: codex,  model: gpt-5, effort: high, flags: "" }
-defaults: { role: build }
 "#;
 
 #[test]
-fn loads_and_resolves() {
-    let c = write_cfg(SAMPLE);
-    let cfg = Config::load(&c.path).unwrap();
+fn loads_json_and_resolves_roles() {
+    let path = write_cfg("config.json", SAMPLE_JSON);
+    let cfg = Config::load(&path).unwrap();
 
-    assert_eq!(cfg.resolve_role("planner").as_deref(), Some("planner"));
-    assert_eq!(cfg.resolve_role("nonexistent").as_deref(), Some("build")); // -> defaults.role
-    assert_eq!(cfg.role_field("planner", "tool").as_deref(), Some("claude"));
-    assert_eq!(cfg.role_field("planner", "model").as_deref(), Some("opus"));
-    assert_eq!(cfg.role_field("build", "flags"), None); // empty string -> None
+    assert_eq!(cfg.resolve_role("manager").as_deref(), Some("manager"));
+    assert_eq!(cfg.resolve_role("nonexistent").as_deref(), Some("builder"));
+    assert_eq!(cfg.role_field("manager", "tool").as_deref(), Some("claude"));
+    assert_eq!(cfg.role_field("manager", "model").as_deref(), Some("opus"));
+    assert_eq!(cfg.role_field("manager", "flags"), None);
     assert_eq!(cfg.max_iterations(), 7);
     assert_eq!(cfg.max_parallel(), 2);
     assert_eq!(cfg.max_attempts(), 3);
 }
 
 #[test]
+fn yaml_config_fails_with_migration_message() {
+    let path = write_cfg(
+        "config.yaml",
+        "routing:\n  builder: { tool: codex, model: gpt-5, effort: high }\ndefaults: { role: builder }\n",
+    );
+
+    let err = Config::load(&path).unwrap_err().to_string();
+    assert!(
+        err.contains("config must be JSON; migrate config.yaml to config.json"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn ensure_default_creates_global_json() {
+    let path = temp_path("nested/agentloop/config.json");
+    Config::ensure_default_config(&path).unwrap();
+
+    assert!(path.exists());
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.trim_start().starts_with('{'), "default config is JSON");
+    let cfg = Config::load(&path).unwrap();
+    assert_eq!(cfg.resolve_role("missing").as_deref(), Some("builder"));
+    assert_eq!(cfg.role_field("builder", "tool").as_deref(), Some("codex"));
+    assert_eq!(cfg.role_field("builder", "flags"), None);
+}
+
+#[test]
 fn caps_default_when_absent() {
-    let c = write_cfg("routing: {}\ndefaults: {}\n");
-    let cfg = Config::load(&c.path).unwrap();
+    let path = write_cfg("config.json", r#"{ "routing": {}, "defaults": {} }"#);
+    let cfg = Config::load(&path).unwrap();
+
     assert_eq!(cfg.max_iterations(), 25);
     assert_eq!(cfg.item_timeout_sec(), 1200);
-    assert_eq!(cfg.resolve_role("anything"), None); // no defaults.role
+    assert_eq!(cfg.resolve_role("anything"), None);
 }

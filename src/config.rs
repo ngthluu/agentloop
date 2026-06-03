@@ -1,7 +1,26 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub const DEFAULT_CONFIG_JSON: &str = r#"{
+  "caps": {
+    "max_iterations": 25,
+    "max_parallel": 3,
+    "item_timeout_sec": 1200,
+    "total_budget_sec": 21600,
+    "max_attempts": 3
+  },
+  "routing": {
+    "manager": { "tool": "claude", "model": "opus", "effort": "high" },
+    "architect": { "tool": "claude", "model": "opus", "effort": "high" },
+    "builder": { "tool": "codex", "model": "gpt-5", "effort": "high" },
+    "customer": { "tool": "claude", "model": "sonnet", "effort": "medium" },
+    "resolver": { "tool": "claude", "model": "sonnet", "effort": "medium" }
+  },
+  "defaults": { "role": "builder" }
+}
+"#;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Caps {
@@ -17,7 +36,6 @@ pub struct Role {
     pub tool: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    pub flags: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -36,10 +54,52 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn default_config_path() -> PathBuf {
+        if let Some(path) = non_empty_env_path("AGENTLOOP_CONFIG") {
+            return path;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            home_dir()
+                .join("Library")
+                .join("Application Support")
+                .join("agentloop")
+                .join("config.json")
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            if let Some(path) = non_empty_env_path("XDG_CONFIG_HOME") {
+                path.join("agentloop").join("config.json")
+            } else {
+                home_dir()
+                    .join(".config")
+                    .join("agentloop")
+                    .join("config.json")
+            }
+        }
+    }
+
+    pub fn ensure_default_config(path: &Path) -> Result<PathBuf> {
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create config dir {}", parent.display()))?;
+            }
+            std::fs::write(path, DEFAULT_CONFIG_JSON)
+                .with_context(|| format!("write default config {}", path.display()))?;
+        }
+        Ok(path.to_path_buf())
+    }
+
     pub fn load(path: &Path) -> Result<Config> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read config {}", path.display()))?;
-        serde_yaml::from_str(&text).context("parse config yaml")
+        if looks_yaml_like(path, &text) {
+            bail!("config must be JSON; migrate config.yaml to config.json");
+        }
+        serde_json::from_str(&text).context("parse config json")
     }
 
     /// Role to actually use: the role if present in routing, else defaults.role.
@@ -58,15 +118,53 @@ impl Config {
             "tool" => r.tool.clone(),
             "model" => r.model.clone(),
             "effort" => r.effort.clone(),
-            "flags" => r.flags.clone(),
+            "flags" => None,
             _ => None,
         };
         v.filter(|s| !s.is_empty())
     }
 
-    pub fn max_iterations(&self) -> u32 { self.caps.max_iterations.unwrap_or(25) }
-    pub fn max_parallel(&self) -> u32 { self.caps.max_parallel.unwrap_or(3) }
-    pub fn item_timeout_sec(&self) -> u64 { self.caps.item_timeout_sec.unwrap_or(1200) }
-    pub fn total_budget_sec(&self) -> u64 { self.caps.total_budget_sec.unwrap_or(21600) }
-    pub fn max_attempts(&self) -> u32 { self.caps.max_attempts.unwrap_or(3) }
+    pub fn max_iterations(&self) -> u32 {
+        self.caps.max_iterations.unwrap_or(25)
+    }
+    pub fn max_parallel(&self) -> u32 {
+        self.caps.max_parallel.unwrap_or(3)
+    }
+    pub fn item_timeout_sec(&self) -> u64 {
+        self.caps.item_timeout_sec.unwrap_or(1200)
+    }
+    pub fn total_budget_sec(&self) -> u64 {
+        self.caps.total_budget_sec.unwrap_or(21600)
+    }
+    pub fn max_attempts(&self) -> u32 {
+        self.caps.max_attempts.unwrap_or(3)
+    }
+}
+
+fn non_empty_env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).and_then(|value| {
+        if value.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(value))
+        }
+    })
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn looks_yaml_like(path: &Path, text: &str) -> bool {
+    if matches!(
+        path.extension().and_then(|s| s.to_str()),
+        Some("yaml" | "yml")
+    ) {
+        return true;
+    }
+
+    let trimmed = text.trim_start();
+    !trimmed.is_empty() && !trimmed.starts_with('{') && !trimmed.starts_with('[')
 }
