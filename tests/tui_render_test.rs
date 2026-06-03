@@ -84,6 +84,37 @@ fn goal_entry_screen_shows_prompt_and_continue() {
 }
 
 #[test]
+fn jobs_pane_scrolls_to_keep_selection_visible() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut s = started("goal");
+    for i in 0..40 {
+        s.apply(Event::JobDispatched {
+            id: format!("it-{i}"),
+            label: format!("jobLABEL{i}"),
+            tool: "codex".into(),
+            model: "gpt".into(),
+            log_path: None,
+        });
+    }
+    // Focus Jobs, then move the selection to the last job.
+    s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    for _ in 0..39 {
+        s.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let backend = TestBackend::new(80, 20);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+    assert!(
+        find(&term, "jobLABEL39").is_some(),
+        "selected (last) job scrolled into view"
+    );
+    assert!(
+        find(&term, "jobLABEL0 ").is_none(),
+        "first job scrolled out of view"
+    );
+}
+
+#[test]
 fn list_view_shows_input_target_label() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut s = AppState::new("g".into());

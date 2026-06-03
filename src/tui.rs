@@ -430,7 +430,7 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
     use ratatui::layout::{Constraint, Direction, Layout};
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::Line;
-    use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+    use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
     let area = f.area();
 
@@ -494,19 +494,11 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         let job_items: Vec<ListItem> = s
             .jobs
             .iter()
-            .enumerate()
-            .map(|(i, j)| {
+            .map(|j| {
                 let glyph = status_glyph(&j.status);
                 let dur = j.elapsed().map(fmt_elapsed).unwrap_or_default();
                 let line = format!(" {} {} [{}/{}]  {}", glyph, j.label, j.tool, j.model, dur);
-                let style = if s.focus_is_jobs() && i == s.selected_job {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(Line::from(line)).style(style)
+                ListItem::new(Line::from(line))
             })
             .collect();
         let jobs_border = if s.focus_is_jobs() {
@@ -514,13 +506,26 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         } else {
             Color::Blue
         };
-        let jobs_list = List::new(job_items).block(
-            Block::default()
-                .title(" Jobs ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(jobs_border)),
-        );
-        f.render_widget(jobs_list, main_chunks[0]);
+        let jobs_highlight = if s.focus_is_jobs() {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let jobs_list = List::new(job_items)
+            .block(
+                Block::default()
+                    .title(" Jobs ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(jobs_border)),
+            )
+            .highlight_style(jobs_highlight);
+        let mut jobs_state = ListState::default();
+        if !s.jobs.is_empty() {
+            jobs_state.select(Some(s.selected_job.min(s.jobs.len() - 1)));
+        }
+        f.render_stateful_widget(jobs_list, main_chunks[0], &mut jobs_state);
 
         let inbox_items: Vec<ListItem> = s
             .inbox
