@@ -31,21 +31,29 @@ pub fn ready_items(path: &Path, ws: &Path, max_parallel: usize) -> Result<Vec<St
     let v = read(path)?;
     let empty = vec![];
     let items = v["items"].as_array().unwrap_or(&empty);
-    let done: HashSet<&str> = items.iter()
+    let done: HashSet<&str> = items
+        .iter()
         .filter(|i| i["status"] == "done")
         .filter_map(|i| i["id"].as_str())
         .collect();
     let mut out = Vec::new();
     for it in items {
-        let id = match it["id"].as_str() { Some(i) => i, None => continue };
+        let id = match it["id"].as_str() {
+            Some(i) => i,
+            None => continue,
+        };
         let dispatchable = match it["status"].as_str() {
             Some("ready") => true,
             Some("blocked") => !crate::inbox::has_question(ws, id),
             _ => false,
         };
-        if !dispatchable { continue; }
+        if !dispatchable {
+            continue;
+        }
         let deps_ok = match it.get("deps").and_then(|d| d.as_array()) {
-            Some(deps) => deps.iter().all(|d| d.as_str().map(|s| done.contains(s)).unwrap_or(false)),
+            Some(deps) => deps
+                .iter()
+                .all(|d| d.as_str().map(|s| done.contains(s)).unwrap_or(false)),
             None => true, // missing deps key == no deps
         };
         if deps_ok {
@@ -59,8 +67,16 @@ pub fn ready_items(path: &Path, ws: &Path, max_parallel: usize) -> Result<Vec<St
 pub fn open_count(path: &Path) -> Result<i64> {
     let v = read(path)?;
     let empty = vec![];
-    let n = v["items"].as_array().unwrap_or(&empty).iter()
-        .filter(|i| matches!(i["status"].as_str(), Some("ready") | Some("in_progress") | Some("blocked")))
+    let n = v["items"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|i| {
+            matches!(
+                i["status"].as_str(),
+                Some("ready") | Some("in_progress") | Some("blocked")
+            )
+        })
         .count();
     Ok(n as i64)
 }
@@ -71,7 +87,9 @@ pub fn set_status(path: &Path, id: &str, status: &str, note: &str) -> Result<()>
         for it in items.iter_mut() {
             if it["id"] == json!(id) {
                 it["status"] = json!(status);
-                if !note.is_empty() { it["notes"] = json!(note); }
+                if !note.is_empty() {
+                    it["notes"] = json!(note);
+                }
             }
         }
     }
@@ -99,8 +117,12 @@ pub fn item<'a>(v: &'a Value, id: &str) -> Option<&'a Value> {
 pub fn blocked_count(path: &Path) -> Result<i64> {
     let v = read(path)?;
     let empty = vec![];
-    Ok(v["items"].as_array().unwrap_or(&empty).iter()
-        .filter(|i| i["status"] == "blocked").count() as i64)
+    Ok(v["items"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|i| i["status"] == "blocked")
+        .count() as i64)
 }
 
 /// Items genuinely waiting on the user: `blocked` AND carrying a pending question
@@ -109,8 +131,16 @@ pub fn blocked_count(path: &Path) -> Result<i64> {
 pub fn user_blocked_count(path: &Path, ws: &Path) -> Result<i64> {
     let v = read(path)?;
     let empty = vec![];
-    Ok(v["items"].as_array().unwrap_or(&empty).iter()
+    Ok(v["items"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
         .filter(|i| i["status"] == "blocked")
-        .filter(|i| i["id"].as_str().map(|id| crate::inbox::has_question(ws, id)).unwrap_or(false))
+        .filter(|i| {
+            i["id"]
+                .as_str()
+                .map(|id| crate::inbox::has_question(ws, id))
+                .unwrap_or(false)
+        })
         .count() as i64)
 }

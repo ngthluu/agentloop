@@ -25,8 +25,8 @@ fn apath(ws: &Path, id: &str) -> std::path::PathBuf {
 }
 
 pub fn read_question(ws: &Path, id: &str) -> Result<Question> {
-    let text = std::fs::read_to_string(qpath(ws, id))
-        .with_context(|| format!("no question for {id}"))?;
+    let text =
+        std::fs::read_to_string(qpath(ws, id)).with_context(|| format!("no question for {id}"))?;
     serde_json::from_str(&text).context("parse question json")
 }
 
@@ -46,8 +46,8 @@ pub fn record_answer(ws: &Path, id: &str, question: &str, answer: &str) -> Resul
 }
 
 pub fn read_answer(ws: &Path, id: &str) -> Result<Answer> {
-    let text = std::fs::read_to_string(apath(ws, id))
-        .with_context(|| format!("no answer for {id}"))?;
+    let text =
+        std::fs::read_to_string(apath(ws, id)).with_context(|| format!("no answer for {id}"))?;
     serde_json::from_str(&text).context("parse answer json")
 }
 

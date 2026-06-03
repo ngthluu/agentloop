@@ -12,7 +12,11 @@ fn log_git(repo: &Path, args: &[&str], out: &std::process::Output) {
         Some(dir) if dir.exists() => {}
         _ => return,
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
         let _ = writeln!(f, "$ git {}", args.join(" "));
         let _ = f.write_all(&out.stdout);
         let _ = f.write_all(&out.stderr);
@@ -22,7 +26,11 @@ fn log_git(repo: &Path, args: &[&str], out: &std::process::Output) {
 /// Run git, capturing stdout+stderr (never inheriting them onto the TUI). Returns
 /// whether the command succeeded.
 fn git(repo: &Path, args: &[&str]) -> Result<bool> {
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()?;
     log_git(repo, args, &out);
     Ok(out.status.success())
 }
@@ -77,7 +85,8 @@ pub fn merge_in_progress(repo: &Path) -> bool {
 /// Whether the index has unmerged (conflicted) paths.
 pub fn has_unmerged(repo: &Path) -> bool {
     let out = Command::new("git")
-        .arg("-C").arg(repo)
+        .arg("-C")
+        .arg(repo)
         .args(["diff", "--name-only", "--diff-filter=U"])
         .output();
     match out {

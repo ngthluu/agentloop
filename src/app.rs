@@ -95,7 +95,11 @@ fn install_tui_sigterm_handler() {
         };
         term.recv().await;
         let _ = disable_raw_mode();
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        let _ = execute!(
+            std::io::stdout(),
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
         crate::spawn::kill_all_agents();
         std::process::exit(143);
     });

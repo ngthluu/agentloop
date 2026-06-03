@@ -25,7 +25,14 @@ fn hms() -> String {
 
 impl Reporter for EventLineReporter {
     fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str, _log: Option<&Path>) {
-        eprintln!("{}  dispatch {:<10} {}/{}  {}", hms(), id, tool, model, label);
+        eprintln!(
+            "{}  dispatch {:<10} {}/{}  {}",
+            hms(),
+            id,
+            tool,
+            model,
+            label
+        );
     }
     fn status(&self, id: &str, status: &str, tool: &str, model: &str) {
         eprintln!("{}  {:<9} {:<10} {}/{}", hms(), status, id, tool, model);

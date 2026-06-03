@@ -156,7 +156,9 @@ pub fn format_claude_event(line: &str) -> Vec<String> {
 
 /// A short, single-line summary of a tool call's input for the log.
 fn tool_brief(name: &str, input: Option<&serde_json::Value>) -> String {
-    let Some(input) = input else { return String::new() };
+    let Some(input) = input else {
+        return String::new();
+    };
     let pick = |k: &str| input.get(k).and_then(|v| v.as_str());
     let raw = match name {
         "Bash" => pick("command").map(|c| format!("$ {c}")),
@@ -302,8 +304,8 @@ pub async fn agent_run(
     let rrole = cfg.resolve_role(role).context("no resolvable role")?;
     let stream_claude = cfg.role_field(&rrole, "tool").as_deref() == Some("claude");
     if std::env::var("FAKE_AGENT").as_deref() == Ok("1") {
-        let bin = std::env::var("FAKE_AGENT_BIN")
-            .context("FAKE_AGENT=1 but FAKE_AGENT_BIN unset")?;
+        let bin =
+            std::env::var("FAKE_AGENT_BIN").context("FAKE_AGENT=1 but FAKE_AGENT_BIN unset")?;
         argv.insert(0, bin);
     }
     run_with_timeout(&argv, cwd, log, t, stream_claude).await

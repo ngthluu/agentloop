@@ -8,6 +8,9 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_secs(secs));
         }
     }
-    let code = std::env::var("FAKE_EXIT").ok().and_then(|c| c.parse::<i32>().ok()).unwrap_or(0);
+    let code = std::env::var("FAKE_EXIT")
+        .ok()
+        .and_then(|c| c.parse::<i32>().ok())
+        .unwrap_or(0);
     std::process::exit(code);
 }
