@@ -175,6 +175,18 @@ fn reopen_parent_for_redesign(bk: &Path, ws: &Path, task_id: &str, note: &str) -
     Ok(())
 }
 
+fn gate_failure_feedback(ws: &Path) -> String {
+    let output = std::fs::read_to_string(ws.join(".agentloop/state/last_gate.txt"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if output.is_empty() {
+        "verify.sh failed; redesign required".to_string()
+    } else {
+        format!("verify.sh failed; redesign required:\n{output}")
+    }
+}
+
 fn task_blocked_on_builder_question(ws: &Path, task_id: &str) -> Result<bool> {
     let builders = match task_state::read_builders(ws, task_id) {
         Ok(builders) => builders,
@@ -297,6 +309,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
 
     let mut handles = Vec::new();
     let mut dispatched: Vec<(String, String)> = Vec::new();
+    let mut pending_redesign = std::collections::BTreeMap::<String, String>::new();
     let active = active_business_ids(&bk, ws)?;
     for task_id in &active {
         if !task_state::builder_plan_valid(ws, task_id) {
@@ -313,6 +326,8 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             };
             let att = item.get("attempts").and_then(|a| a.as_u64()).unwrap_or(0) as u32;
             if att >= maxatt {
+                let note =
+                    format!("builder {id} exceeded max_attempts ({maxatt}); redesign required");
                 task_state::set_builder_status(
                     ws,
                     task_id,
@@ -320,12 +335,14 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "failed",
                     &format!("exceeded max_attempts ({maxatt})"),
                 )?;
-                reopen_parent_for_redesign(
-                    &bk,
-                    ws,
-                    task_id,
-                    &format!("builder {id} exceeded max_attempts ({maxatt}); redesign required"),
-                )?;
+                if dispatched
+                    .iter()
+                    .any(|(dispatched_task_id, _)| dispatched_task_id == task_id)
+                {
+                    pending_redesign.insert(task_id.clone(), note);
+                } else {
+                    reopen_parent_for_redesign(&bk, ws, task_id, &note)?;
+                }
                 break;
             }
             let backlog = state::read(&bk)?;
@@ -336,6 +353,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             let _ = std::fs::remove_dir_all(&wt);
             worktree::remove(ws, &wt, &format!("item/{id}"));
             if worktree::create(ws, &format!("item/{id}"), &wt).is_err() {
+                let note = format!("builder {id} failed before dispatch: worktree create failed");
                 task_state::set_builder_status(
                     ws,
                     task_id,
@@ -343,12 +361,14 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "failed",
                     "worktree create failed",
                 )?;
-                reopen_parent_for_redesign(
-                    &bk,
-                    ws,
-                    task_id,
-                    &format!("builder {id} failed before dispatch: worktree create failed"),
-                )?;
+                if dispatched
+                    .iter()
+                    .any(|(dispatched_task_id, _)| dispatched_task_id == task_id)
+                {
+                    pending_redesign.insert(task_id.clone(), note);
+                } else {
+                    reopen_parent_for_redesign(&bk, ws, task_id, &note)?;
+                }
                 break;
             }
             task_state::set_builder_status(ws, task_id, &id, "in_progress", "")?;
@@ -488,6 +508,10 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         let _ = std::fs::remove_file(&rfile);
     }
 
+    for (task_id, note) in pending_redesign {
+        reopen_parent_for_redesign(&bk, ws, &task_id, &note)?;
+    }
+
     for task_id in active_business_ids(&bk, ws)? {
         if !task_state::builder_plan_valid(ws, &task_id)
             || !task_state::all_builders_done(ws, &task_id)?
@@ -495,6 +519,8 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             continue;
         }
         if gate(ws) != 0 {
+            let feedback = gate_failure_feedback(ws);
+            reopen_parent_for_redesign(&bk, ws, &task_id, &feedback)?;
             continue;
         }
         let backlog = state::read(&bk)?;

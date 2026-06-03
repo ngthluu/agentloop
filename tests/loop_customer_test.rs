@@ -20,6 +20,174 @@ fn cfg() -> Config {
 }"#).unwrap()
 }
 
+fn cfg_with_parallel(max_parallel: u32) -> Config {
+    serde_json::from_str(&format!(
+        r#"{{
+  "caps": {{ "max_iterations": 3, "max_parallel": {max_parallel}, "item_timeout_sec": 30, "total_budget_sec": 300, "max_attempts": 3 }},
+  "routing": {{
+    "manager": {{ "tool": "claude", "model": "opus", "effort": "high" }},
+    "architect": {{ "tool": "claude", "model": "opus", "effort": "high" }},
+    "builder": {{ "tool": "codex", "model": "gpt-5", "effort": "high" }},
+    "customer": {{ "tool": "claude", "model": "sonnet", "effort": "medium" }},
+    "resolver": {{ "tool": "claude", "model": "sonnet", "effort": "medium" }}
+  }},
+  "defaults": {{ "role": "builder" }}
+}}"#
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn gate_failure_after_all_builders_done_reopens_parent_for_redesign() {
+    let _env = ENV_LOCK.lock().await;
+    let ws = common::init_ws_with_stub();
+    let stub = r##"#!/bin/bash
+tool="$1"; shift
+ws_state="$WS/.agentloop/state"; res="$WS/.agentloop/results"
+prompt="$*"
+case "$prompt" in
+  *MANAGER*)
+    echo '{"items":[{"id":"task-1","title":"f","desc":"d","deps":[],"status":"ready","attempts":0,"acceptance":"file exists"}]}' > "$ws_state/backlog.json"
+    printf '#!/bin/bash\necho "gate failed because smoke check failed"\nexit 1\n' > "$WS/.agentloop/verify.sh"; chmod +x "$WS/.agentloop/verify.sh"
+    echo "# updated" > "$ws_state/master.md"
+    ;;
+  *ARCHITECT*)
+    mkdir -p "$ws_state/tasks/task-1"
+    echo "Make the file." > "$ws_state/tasks/task-1/design.md"
+    echo '{"items":[{"id":"task-1-b1","title":"make file","desc":"write made.txt","deps":[],"status":"ready","attempts":0,"acceptance":"made.txt exists"}]}' > "$ws_state/tasks/task-1/builders.json"
+    ;;
+  *BUILDER*)
+    echo made > "$PWD/made.txt"; git add -A; git commit -qm "builder" 2>/dev/null
+    echo '{"status":"done","summary":"made file","files_changed":["made.txt"]}' > "$res/task-1-b1.json"
+    ;;
+  *"SILLY CUSTOMER"*)
+    echo '{"status":"approved","summary":"should not run"}' > "$ws_state/tasks/task-1/customer.json"
+    ;;
+esac
+exit 0
+"##;
+    std::fs::write(ws.join("stub.sh"), stub).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ws.join("stub.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+
+    std::env::set_var("FAKE_AGENT", "1");
+    std::env::set_var("FAKE_AGENT_BIN", ws.join("stub.sh"));
+    std::env::set_var("WS", &ws);
+
+    let reporter: Arc<dyn Reporter> = Arc::new(EventLineReporter);
+    let merged = orchestrator::iterate(&cfg(), &ws, 1, &reporter)
+        .await
+        .unwrap();
+    assert_eq!(merged, 1);
+
+    let bk = ws.join(".agentloop/state/backlog.json");
+    let v = state::read(&bk).unwrap();
+    let task = state::item(&v, "task-1").unwrap();
+    assert_eq!(task["status"], "ready");
+    assert!(
+        task["notes"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("gate failed because smoke check failed"),
+        "gate failure output is preserved as redesign feedback"
+    );
+    assert_eq!(state::open_count(&bk).unwrap(), 1);
+    assert!(
+        !ws.join(".agentloop/state/tasks/task-1/builders.json")
+            .exists(),
+        "gate failure invalidates the completed local plan"
+    );
+    assert!(
+        !ws.join(".agentloop/state/tasks/task-1/customer.json")
+            .exists(),
+        "customer review is not run or retained after gate failure"
+    );
+
+    std::env::remove_var("FAKE_AGENT");
+    std::env::remove_var("FAKE_AGENT_BIN");
+    std::env::remove_var("WS");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[tokio::test]
+async fn same_task_redesign_during_dispatch_is_deferred_until_integrations_clean_up() {
+    let _env = ENV_LOCK.lock().await;
+    let ws = common::init_ws_with_stub();
+    let stub = r##"#!/bin/bash
+tool="$1"; shift
+ws_state="$WS/.agentloop/state"; res="$WS/.agentloop/results"
+prompt="$*"
+case "$prompt" in
+  *MANAGER*)
+    echo '{"items":[{"id":"task-1","title":"f","desc":"d","deps":[],"status":"ready","attempts":0,"acceptance":"file exists"}]}' > "$ws_state/backlog.json"
+    printf '#!/bin/bash\nexit 0\n' > "$WS/.agentloop/verify.sh"; chmod +x "$WS/.agentloop/verify.sh"
+    echo "# updated" > "$ws_state/master.md"
+    ;;
+  *ARCHITECT*)
+    mkdir -p "$ws_state/tasks/task-1"
+    echo "Make the files." > "$ws_state/tasks/task-1/design.md"
+    echo '{"items":[{"id":"task-1-b1","title":"make first file","desc":"write made-1.txt","deps":[],"status":"ready","attempts":0,"acceptance":"made-1.txt exists"},{"id":"task-1-b2","title":"make second file","desc":"write made-2.txt","deps":[],"status":"ready","attempts":3,"acceptance":"made-2.txt exists"}]}' > "$ws_state/tasks/task-1/builders.json"
+    ;;
+  *BUILDER*)
+    echo made > "$PWD/made-1.txt"; git add -A; git commit -qm "builder one" 2>/dev/null
+    echo '{"status":"done","summary":"made first file","files_changed":["made-1.txt"]}' > "$res/task-1-b1.json"
+    ;;
+esac
+exit 0
+"##;
+    std::fs::write(ws.join("stub.sh"), stub).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ws.join("stub.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+
+    std::env::set_var("FAKE_AGENT", "1");
+    std::env::set_var("FAKE_AGENT_BIN", ws.join("stub.sh"));
+    std::env::set_var("WS", &ws);
+
+    let reporter: Arc<dyn Reporter> = Arc::new(EventLineReporter);
+    let merged = orchestrator::iterate(&cfg_with_parallel(2), &ws, 1, &reporter)
+        .await
+        .unwrap();
+    assert_eq!(merged, 1, "already-dispatched builder still integrates");
+
+    let bk = ws.join(".agentloop/state/backlog.json");
+    let v = state::read(&bk).unwrap();
+    let task = state::item(&v, "task-1").unwrap();
+    assert_eq!(task["status"], "ready");
+    assert!(
+        task["notes"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("task-1-b2 exceeded max_attempts"),
+        "deferred redesign preserves the dispatch setup failure"
+    );
+    assert!(
+        !ws.join(".agentloop/state/tasks/task-1/builders.json")
+            .exists(),
+        "redesign is applied after same-task integrations finish"
+    );
+    assert!(
+        !ws.join(".agentloop/worktrees/task-1-b1").exists(),
+        "integrated builder worktree is cleaned before redesign invalidation"
+    );
+    assert!(
+        !ws.join(".agentloop/results/task-1-b1.json").exists(),
+        "integrated builder result is cleaned before redesign invalidation"
+    );
+
+    std::env::remove_var("FAKE_AGENT");
+    std::env::remove_var("FAKE_AGENT_BIN");
+    std::env::remove_var("WS");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 #[tokio::test]
 async fn customer_rejection_keeps_business_task_ready_with_feedback() {
     let _env = ENV_LOCK.lock().await;
