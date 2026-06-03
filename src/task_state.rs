@@ -21,6 +21,52 @@ pub fn customer_path(ws: &Path, task_id: &str) -> PathBuf {
     task_dir(ws, task_id).join("customer.json")
 }
 
+pub fn redesign_path(ws: &Path, task_id: &str) -> PathBuf {
+    task_dir(ws, task_id).join("redesign.json")
+}
+
+/// Orchestrator-owned redesign bookkeeping: `(count, feedback)`. Missing or
+/// unparseable file reads as `(0, "")`. Lives outside backlog.json so the manager's
+/// full rewrite of the backlog cannot reset it.
+pub fn read_redesign(ws: &Path, task_id: &str) -> (u32, String) {
+    match std::fs::read_to_string(redesign_path(ws, task_id)) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(v) => (
+                v.get("count").and_then(|c| c.as_u64()).unwrap_or(0) as u32,
+                v.get("feedback")
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            ),
+            Err(_) => (0, String::new()),
+        },
+        Err(_) => (0, String::new()),
+    }
+}
+
+/// The stored feedback from the most recent redesign trigger, or "" if none.
+pub fn redesign_feedback(ws: &Path, task_id: &str) -> String {
+    read_redesign(ws, task_id).1
+}
+
+/// Increment the redesign count and store the latest failure feedback. Returns the
+/// new count.
+pub fn bump_redesign(ws: &Path, task_id: &str, feedback: &str) -> Result<u32> {
+    let (count, _) = read_redesign(ws, task_id);
+    let next = count + 1;
+    ensure_task_dir(ws, task_id)?;
+    write_atomic(
+        &redesign_path(ws, task_id),
+        &json!({"count": next, "feedback": feedback}),
+    )?;
+    Ok(next)
+}
+
+/// Clear the redesign counter (called when the task is genuinely completed).
+pub fn reset_redesign(ws: &Path, task_id: &str) {
+    let _ = std::fs::remove_file(redesign_path(ws, task_id));
+}
+
 pub fn read_builders(ws: &Path, task_id: &str) -> Result<Value> {
     read_json(&builders_path(ws, task_id))
 }
@@ -285,4 +331,49 @@ fn has_cycle(
     visiting.remove(id);
     visited.insert(id.to_string());
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_ws(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn redesign_counter_bumps_persists_and_resets() {
+        let ws = tmp_ws("redesign-helpers");
+        // Missing file reads as (0, "").
+        assert_eq!(read_redesign(&ws, "task-1"), (0, String::new()));
+
+        // First bump -> count 1, feedback stored.
+        assert_eq!(bump_redesign(&ws, "task-1", "gate failed").unwrap(), 1);
+        assert_eq!(
+            read_redesign(&ws, "task-1"),
+            (1, "gate failed".to_string())
+        );
+        assert_eq!(redesign_feedback(&ws, "task-1"), "gate failed");
+
+        // Second bump -> count 2, feedback replaced.
+        assert_eq!(bump_redesign(&ws, "task-1", "customer rejected").unwrap(), 2);
+        assert_eq!(
+            read_redesign(&ws, "task-1"),
+            (2, "customer rejected".to_string())
+        );
+
+        // Reset clears the file back to defaults.
+        reset_redesign(&ws, "task-1");
+        assert_eq!(read_redesign(&ws, "task-1"), (0, String::new()));
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 }
