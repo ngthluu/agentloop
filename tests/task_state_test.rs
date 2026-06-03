@@ -149,6 +149,43 @@ fn invalid_builder_plan_rejects_empty_items_missing_fields_duplicates_and_bad_pr
 }
 
 #[test]
+fn invalid_builder_plan_rejects_missing_or_empty_design() {
+    let ws = tmp_ws("task-state-invalid-design");
+    write_builders(
+        &ws,
+        "task-design",
+        json!([builder("task-design-b1", "ready", json!([]))]),
+    );
+
+    assert!(!task_state::builder_plan_valid(&ws, "task-design"));
+
+    let dir = task_state::ensure_task_dir(&ws, "task-design").unwrap();
+    std::fs::write(dir.join("design.md"), "   \n\t").unwrap();
+
+    assert!(!task_state::builder_plan_valid(&ws, "task-design"));
+}
+
+#[test]
+fn invalid_builder_plan_rejects_missing_required_string_field() {
+    let ws = tmp_ws("task-state-missing-string");
+    write_design(&ws, "task-acceptance");
+    write_builders(
+        &ws,
+        "task-acceptance",
+        json!([{
+            "id": "task-acceptance-b1",
+            "title": "Build it",
+            "desc": "Implement it",
+            "deps": [],
+            "status": "ready",
+            "attempts": 0
+        }]),
+    );
+
+    assert!(!task_state::builder_plan_valid(&ws, "task-acceptance"));
+}
+
+#[test]
 fn mutates_builder_status_and_attempts() {
     let ws = tmp_ws("task-state-mutate");
     write_design(&ws, "task-4");
