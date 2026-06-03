@@ -357,14 +357,14 @@ mod tests {
 
         // First bump -> count 1, feedback stored.
         assert_eq!(bump_redesign(&ws, "task-1", "gate failed").unwrap(), 1);
-        assert_eq!(
-            read_redesign(&ws, "task-1"),
-            (1, "gate failed".to_string())
-        );
+        assert_eq!(read_redesign(&ws, "task-1"), (1, "gate failed".to_string()));
         assert_eq!(redesign_feedback(&ws, "task-1"), "gate failed");
 
         // Second bump -> count 2, feedback replaced.
-        assert_eq!(bump_redesign(&ws, "task-1", "customer rejected").unwrap(), 2);
+        assert_eq!(
+            bump_redesign(&ws, "task-1", "customer rejected").unwrap(),
+            2
+        );
         assert_eq!(
             read_redesign(&ws, "task-1"),
             (2, "customer rejected".to_string())

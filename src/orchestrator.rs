@@ -807,7 +807,11 @@ mod tests {
             "id":"task-1","title":"t","desc":"d","deps":[],
             "status":"in_progress","attempts":0,"acceptance":"a"
         }]});
-        std::fs::write(sdir.join("backlog.json"), serde_json::to_vec(&backlog).unwrap()).unwrap();
+        std::fs::write(
+            sdir.join("backlog.json"),
+            serde_json::to_vec(&backlog).unwrap(),
+        )
+        .unwrap();
         let tdir = sdir.join("tasks/task-1");
         std::fs::create_dir_all(&tdir).unwrap();
         std::fs::write(tdir.join("design.md"), "design").unwrap();
