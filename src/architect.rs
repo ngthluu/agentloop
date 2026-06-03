@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -27,11 +28,12 @@ Your job:
 1. Inspect the application and decide the technical plan for this one business task.
 2. Write {task_dir}/design.md with the implementation approach, files/components likely involved, constraints, and verification notes.
 3. Write {task_dir}/builders.json with builder-sized implementation items.
+4. Give every builder item a globally unique id prefixed with this task id, such as {id}-b1, {id}-b2.
 
 OUTPUT CONTRACT — you MUST write valid files:
 - {task_dir}/design.md must be non-empty.
 - {task_dir}/builders.json must be valid JSON shaped like:
-  {{"items":[{{"id":"builder-1","title":"Implement one focused slice","desc":"Specific implementation work","deps":[],"status":"ready","attempts":0,"acceptance":"How to verify this slice"}}]}}
+  {{"items":[{{"id":"{id}-b1","title":"Implement one focused slice","desc":"Specific implementation work","deps":[],"status":"ready","attempts":0,"acceptance":"How to verify this slice"}}]}}
 
 Do not edit application source code. Do not implement the task. Do not write global backlog files."#,
         ws = ws.display(),
@@ -83,22 +85,34 @@ fn architect_output_valid(ws: &Path, task: &Value) -> bool {
     };
     matches!(
         serde_json::from_str::<Value>(&builders),
-        Ok(v) if builders_items_valid(&v)
+        Ok(v) if builders_items_valid(&v, id)
     )
 }
 
-fn builders_items_valid(v: &Value) -> bool {
+fn builders_items_valid(v: &Value, parent_id: &str) -> bool {
     let Some(items) = v.get("items").and_then(|items| items.as_array()) else {
         return false;
     };
-    !items.is_empty() && items.iter().all(builder_item_valid)
+    let mut seen = HashSet::new();
+    !items.is_empty()
+        && items.iter().all(|item| {
+            let Some(id) = item.get("id").and_then(|id| id.as_str()) else {
+                return false;
+            };
+            builder_item_valid(item, parent_id) && seen.insert(id.to_string())
+        })
 }
 
-fn builder_item_valid(item: &Value) -> bool {
+fn builder_item_valid(item: &Value, parent_id: &str) -> bool {
     non_empty_str(item, "id")
         && non_empty_str(item, "title")
         && non_empty_str(item, "desc")
         && non_empty_str(item, "acceptance")
+        && item
+            .get("id")
+            .and_then(|id| id.as_str())
+            .map(|id| id.starts_with(&format!("{parent_id}-")))
+            .unwrap_or(false)
         && item.get("deps").and_then(|deps| deps.as_array()).is_some()
         && matches!(
             item.get("status").and_then(|status| status.as_str()),
@@ -149,7 +163,7 @@ mod tests {
         write_plan(
             &ws,
             "task-1",
-            r#"{"items":[{"id":"b-1","title":"Parser","desc":"Parse CSV","deps":[],"status":"ready","attempts":0,"acceptance":"rows import"}]}"#,
+            r#"{"items":[{"id":"task-1-b1","title":"Parser","desc":"Parse CSV","deps":[],"status":"ready","attempts":0,"acceptance":"rows import"}]}"#,
         );
 
         assert!(architect_output_valid(&ws, &task));
@@ -174,6 +188,34 @@ mod tests {
             &ws,
             "task-1",
             r#"{"items":[{"id":"b-1","title":"Parser","desc":"Parse CSV","deps":[],"status":"ready","attempts":0}]}"#,
+        );
+
+        assert!(!architect_output_valid(&ws, &task));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn architect_output_rejects_duplicate_builder_ids() {
+        let ws = tmp_ws("archdupe");
+        let task = json!({"id":"task-1"});
+        write_plan(
+            &ws,
+            "task-1",
+            r#"{"items":[{"id":"task-1-b1","title":"Parser","desc":"Parse CSV","deps":[],"status":"ready","attempts":0,"acceptance":"rows import"},{"id":"task-1-b1","title":"Importer","desc":"Import rows","deps":["task-1-b1"],"status":"ready","attempts":0,"acceptance":"rows saved"}]}"#,
+        );
+
+        assert!(!architect_output_valid(&ws, &task));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn architect_output_rejects_non_prefixed_builder_ids() {
+        let ws = tmp_ws("archprefix");
+        let task = json!({"id":"task-1"});
+        write_plan(
+            &ws,
+            "task-1",
+            r#"{"items":[{"id":"builder-1","title":"Parser","desc":"Parse CSV","deps":[],"status":"ready","attempts":0,"acceptance":"rows import"}]}"#,
         );
 
         assert!(!architect_output_valid(&ws, &task));
