@@ -182,13 +182,15 @@ fn builders_items_valid(v: &Value, task_id: &str) -> bool {
     };
 
     let mut seen = HashSet::new();
-    !items.is_empty()
+    let items_valid = !items.is_empty()
         && items.iter().all(|item| {
             let Some(id) = item.get("id").and_then(|id| id.as_str()) else {
                 return false;
             };
             builder_item_valid(item, task_id) && seen.insert(id.to_string())
-        })
+        });
+
+    items_valid && builder_deps_valid(items, &seen)
 }
 
 fn builder_item_valid(item: &Value, task_id: &str) -> bool {
@@ -217,4 +219,70 @@ fn non_empty_str(item: &Value, key: &str) -> bool {
         .and_then(|value| value.as_str())
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
+}
+
+fn builder_deps_valid(items: &[Value], ids: &HashSet<String>) -> bool {
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+
+    items.iter().all(|item| deps_shape_valid(item, ids))
+        && items.iter().all(|item| {
+            let Some(id) = item.get("id").and_then(|id| id.as_str()) else {
+                return false;
+            };
+            !has_cycle(id, items, &mut visiting, &mut visited)
+        })
+}
+
+fn deps_shape_valid(item: &Value, ids: &HashSet<String>) -> bool {
+    let Some(id) = item.get("id").and_then(|id| id.as_str()) else {
+        return false;
+    };
+    let Some(deps) = item.get("deps").and_then(|deps| deps.as_array()) else {
+        return false;
+    };
+
+    deps.iter().all(|dep| {
+        let Some(dep_id) = dep.as_str() else {
+            return false;
+        };
+        dep_id != id && ids.contains(dep_id)
+    })
+}
+
+fn has_cycle(
+    id: &str,
+    items: &[Value],
+    visiting: &mut HashSet<String>,
+    visited: &mut HashSet<String>,
+) -> bool {
+    if visited.contains(id) {
+        return false;
+    }
+    if !visiting.insert(id.to_string()) {
+        return true;
+    }
+
+    let Some(item) = items
+        .iter()
+        .find(|item| item.get("id").and_then(|item_id| item_id.as_str()) == Some(id))
+    else {
+        return true;
+    };
+
+    let Some(deps) = item.get("deps").and_then(|deps| deps.as_array()) else {
+        return true;
+    };
+    for dep in deps {
+        let Some(dep_id) = dep.as_str() else {
+            return true;
+        };
+        if has_cycle(dep_id, items, visiting, visited) {
+            return true;
+        }
+    }
+
+    visiting.remove(id);
+    visited.insert(id.to_string());
+    false
 }

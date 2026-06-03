@@ -186,6 +186,78 @@ fn invalid_builder_plan_rejects_missing_required_string_field() {
 }
 
 #[test]
+fn invalid_builder_plan_rejects_unknown_dep() {
+    let ws = tmp_ws("task-state-unknown-dep");
+    write_design(&ws, "task-unknown");
+    write_builders(
+        &ws,
+        "task-unknown",
+        json!([builder(
+            "task-unknown-b1",
+            "ready",
+            json!(["task-unknown-missing"])
+        )]),
+    );
+
+    assert!(!task_state::builder_plan_valid(&ws, "task-unknown"));
+}
+
+#[test]
+fn invalid_builder_plan_rejects_foreign_task_dep() {
+    let ws = tmp_ws("task-state-foreign-dep");
+    write_design(&ws, "task-local");
+    write_builders(
+        &ws,
+        "task-local",
+        json!([builder("task-local-b1", "ready", json!(["task-other-b1"]))]),
+    );
+
+    assert!(!task_state::builder_plan_valid(&ws, "task-local"));
+}
+
+#[test]
+fn invalid_builder_plan_rejects_non_string_dep() {
+    let ws = tmp_ws("task-state-non-string-dep");
+    write_design(&ws, "task-dep-type");
+    write_builders(
+        &ws,
+        "task-dep-type",
+        json!([builder("task-dep-type-b1", "ready", json!([42]))]),
+    );
+
+    assert!(!task_state::builder_plan_valid(&ws, "task-dep-type"));
+}
+
+#[test]
+fn invalid_builder_plan_rejects_self_dep() {
+    let ws = tmp_ws("task-state-self-dep");
+    write_design(&ws, "task-self");
+    write_builders(
+        &ws,
+        "task-self",
+        json!([builder("task-self-b1", "ready", json!(["task-self-b1"]))]),
+    );
+
+    assert!(!task_state::builder_plan_valid(&ws, "task-self"));
+}
+
+#[test]
+fn invalid_builder_plan_rejects_simple_cycle() {
+    let ws = tmp_ws("task-state-cycle");
+    write_design(&ws, "task-cycle");
+    write_builders(
+        &ws,
+        "task-cycle",
+        json!([
+            builder("task-cycle-b1", "ready", json!(["task-cycle-b2"])),
+            builder("task-cycle-b2", "ready", json!(["task-cycle-b1"]))
+        ]),
+    );
+
+    assert!(!task_state::builder_plan_valid(&ws, "task-cycle"));
+}
+
+#[test]
 fn mutates_builder_status_and_attempts() {
     let ws = tmp_ws("task-state-mutate");
     write_design(&ws, "task-4");
