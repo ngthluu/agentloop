@@ -1,8 +1,11 @@
 pub mod app;
+pub mod architect;
 pub mod cli;
 pub mod config;
+pub mod customer;
 pub mod events;
 pub mod inbox;
+pub mod manager;
 pub mod orchestrator;
 pub mod planner;
 pub mod requests;
