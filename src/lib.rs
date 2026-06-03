@@ -11,6 +11,7 @@ pub mod planner;
 pub mod requests;
 pub mod spawn;
 pub mod state;
+pub mod task_state;
 pub mod tui;
 pub mod worker;
 pub mod worktree;
