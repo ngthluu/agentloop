@@ -15,6 +15,14 @@ pub fn architect_prompt(ws: &Path, task: &Value) -> String {
         .as_str()
         .unwrap_or("the business task is accepted");
     let task_dir = format!(".agentloop/state/tasks/{id}");
+    let feedback = crate::task_state::redesign_feedback(ws, id);
+    let feedback_block = if feedback.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nA PREVIOUS ATTEMPT AT THIS TASK WAS REJECTED. Your earlier plan did not satisfy the gate or the customer. Produce a DIFFERENT plan that directly addresses this feedback:\n{feedback}\n"
+        )
+    };
     format!(
         r#"You are the ARCHITECT for one business task in an autonomous app build. Working dir: {ws} (a git repo).
 
@@ -22,7 +30,7 @@ BUSINESS TASK:
   id: {id}
   title: {title}
   task: {desc}
-  acceptance criteria: {acc}
+  acceptance criteria: {acc}{feedback_block}
 
 Your job:
 1. Inspect the application and decide the technical plan for this one business task.
@@ -41,7 +49,8 @@ Do not edit application source code. Do not implement the task. Do not write glo
         title = title,
         desc = desc,
         acc = acc,
-        task_dir = task_dir
+        task_dir = task_dir,
+        feedback_block = feedback_block
     )
 }
 
@@ -219,6 +228,25 @@ mod tests {
         );
 
         assert!(!architect_output_valid(&ws, &task));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn architect_prompt_includes_redesign_feedback() {
+        let ws = tmp_ws("archfeedback");
+        let task = json!({"id":"task-1","title":"Login","desc":"Let users log in","acceptance":"user can log in"});
+
+        // No feedback yet: prompt must not mention a prior attempt.
+        let p0 = architect_prompt(&ws, &task);
+        assert!(!p0.contains("PREVIOUS ATTEMPT"));
+
+        // After a redesign is recorded, the feedback must appear in the prompt.
+        crate::task_state::bump_redesign(&ws, "task-1", "verify.sh failed: missing logout route")
+            .unwrap();
+        let p1 = architect_prompt(&ws, &task);
+        assert!(p1.contains("PREVIOUS ATTEMPT"));
+        assert!(p1.contains("missing logout route"));
+
         let _ = std::fs::remove_dir_all(&ws);
     }
 }
