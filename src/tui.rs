@@ -20,20 +20,6 @@ impl Job {
     }
 }
 
-#[derive(Clone)]
-pub struct Pending {
-    pub item_id: String,
-    pub label: String,
-    pub text: String,
-    pub context: String,
-}
-
-#[derive(PartialEq, Clone, Copy)]
-enum Focus {
-    Jobs,
-    Inbox,
-}
-
 #[derive(PartialEq, Clone, Copy)]
 enum View {
     GoalEntry,
@@ -44,14 +30,11 @@ enum View {
 pub struct AppState {
     pub goal: String,
     pub jobs: Vec<Job>,
-    pub inbox: Vec<Pending>,
-    pub selected: usize,
     pub iter: u32,
     pub gate: String,
     pub open: i64,
     pub standby: bool,
     input: String,
-    focus: Focus,
     view: View,
     goal_focus_continue: bool,
     selected_job: usize,
@@ -64,14 +47,11 @@ impl AppState {
         Self {
             goal: goal.clone(),
             jobs: vec![],
-            inbox: vec![],
-            selected: 0,
             iter: 0,
             gate: "init".into(),
             open: 0,
             standby: false,
             input: goal,
-            focus: Focus::Inbox,
             view: View::GoalEntry,
             goal_focus_continue: false,
             selected_job: 0,
@@ -113,27 +93,10 @@ impl AppState {
             }
             Event::JobStatus { id, status } => {
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
-                    let terminal =
-                        matches!(status.as_str(), "merged" | "done" | "failed" | "bounced");
-                    if terminal && j.frozen.is_none() {
+                    if is_terminal_status(&status) && j.frozen.is_none() {
                         j.frozen = j.started.map(|s| s.elapsed());
                     }
                     j.status = status;
-                }
-            }
-            Event::QuestionRaised {
-                item_id,
-                label,
-                text,
-                context,
-            } => {
-                if !self.inbox.iter().any(|p| p.item_id == item_id) {
-                    self.inbox.push(Pending {
-                        item_id,
-                        label,
-                        text,
-                        context,
-                    });
                 }
             }
             Event::Iteration {
@@ -244,47 +207,22 @@ impl AppState {
             return None;
         }
         match k.code {
-            KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::Jobs => Focus::Inbox,
-                    Focus::Inbox => Focus::Jobs,
-                };
-                None
-            }
             KeyCode::Up => {
-                match self.focus {
-                    Focus::Jobs => {
-                        if self.selected_job > 0 {
-                            self.selected_job -= 1;
-                        }
-                    }
-                    Focus::Inbox => {
-                        if self.selected > 0 {
-                            self.selected -= 1;
-                        }
-                    }
+                if self.selected_job > 0 {
+                    self.selected_job -= 1;
                 }
                 None
             }
             KeyCode::Down => {
-                match self.focus {
-                    Focus::Jobs => {
-                        if self.selected_job + 1 < self.jobs.len() {
-                            self.selected_job += 1;
-                        }
-                    }
-                    Focus::Inbox => {
-                        if self.selected + 1 < self.inbox.len() {
-                            self.selected += 1;
-                        }
-                    }
+                if self.selected_job + 1 < self.jobs.len() {
+                    self.selected_job += 1;
                 }
                 None
             }
             KeyCode::Enter => {
-                // Non-empty input submits; empty input runs the focused pane's action.
+                // Non-empty input submits a task; empty input opens the selected job.
                 if self.input.trim().is_empty() {
-                    if self.focus == Focus::Jobs && self.selected_job < self.jobs.len() {
+                    if self.selected_job < self.jobs.len() {
                         self.view = View::JobDetail;
                         self.log_scroll = 0;
                     }
@@ -310,33 +248,18 @@ impl AppState {
         }
     }
 
-    /// Submit the current input, routing by focus/selection. Clears the input.
+    /// Submit the current input as a new task for the manager. Clears the input.
     fn submit(&mut self) -> Option<Command> {
         let text = self.input.trim().to_string();
         if text.is_empty() {
             return None;
         }
-        if self.focus == Focus::Inbox && !self.inbox.is_empty() {
-            let idx = self.selected.min(self.inbox.len().saturating_sub(1));
-            let p = self.inbox.remove(idx);
-            self.selected = 0;
-            self.input.clear();
-            Some(Command::AnswerQuestion {
-                item_id: p.item_id,
-                text,
-            })
-        } else {
-            self.input.clear();
-            Some(Command::AddTask { request: text })
-        }
+        self.input.clear();
+        Some(Command::AddTask { request: text })
     }
 
     pub fn input_buffer(&self) -> &str {
         &self.input
-    }
-
-    pub fn focus_is_jobs(&self) -> bool {
-        self.focus == Focus::Jobs
     }
 
     pub fn in_job_detail(&self) -> bool {
@@ -349,16 +272,6 @@ impl AppState {
 
     pub fn goal_continue_focused(&self) -> bool {
         self.goal_focus_continue
-    }
-
-    /// Label shown above the input: what a submission will do right now.
-    pub fn input_target_label(&self) -> String {
-        if self.focus == Focus::Inbox && !self.inbox.is_empty() {
-            let idx = self.selected.min(self.inbox.len().saturating_sub(1));
-            format!("Answering {}", self.inbox[idx].item_id)
-        } else {
-            "Add task".to_string()
-        }
     }
 
     /// Wall-clock time since the session (TUI) started.
@@ -414,12 +327,24 @@ pub fn tail_file(path: &std::path::Path, max_lines: usize, max_bytes: u64) -> Ve
     }
 }
 
+/// Job statuses that end the working timer (the job will not run further).
+/// Must cover every terminal status the orchestrator reports: merged/done/failed/
+/// bounced for build jobs, approved/rejected for customer reviews.
+fn is_terminal_status(status: &str) -> bool {
+    matches!(
+        status,
+        "merged" | "done" | "failed" | "bounced" | "approved" | "rejected"
+    )
+}
+
 fn status_glyph(status: &str) -> &'static str {
     match status {
         "running" => "●",
         "merged" => "✓",
         "done" => "✓",
+        "approved" => "✓",
         "failed" => "✗",
+        "rejected" => "✗",
         "bounced" => "↺",
         "queued" => "·",
         _ => "?",
@@ -455,23 +380,13 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
     let total = fmt_elapsed(s.total_elapsed());
     let status_text = if s.standby {
         format!(
-            " ✓ DONE · standby  │  {}  │  iter {}  │  gate: {}  │  open: {}  │  ❓{}  │  ⏱ {}",
-            s.goal,
-            s.iter,
-            s.gate,
-            s.open,
-            s.inbox.len(),
-            total
+            " ✓ DONE · standby  │  {}  │  iter {}  │  gate: {}  │  open: {}  │  ⏱ {}",
+            s.goal, s.iter, s.gate, s.open, total
         )
     } else {
         format!(
-            " {}  │  iter {}  │  gate: {}  │  open: {}  │  ❓{}  │  ⏱ {}",
-            s.goal,
-            s.iter,
-            s.gate,
-            s.open,
-            s.inbox.len(),
-            total
+            " {}  │  iter {}  │  gate: {}  │  open: {}  │  ⏱ {}",
+            s.goal, s.iter, s.gate, s.open, total
         )
     };
     let status_bar = Paragraph::new(status_text).style(
@@ -482,15 +397,10 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
     );
     f.render_widget(status_bar, chunks[0]);
 
-    // --- Main area: jobs (top) + inbox (bottom), or the job-detail view ---
+    // --- Main area: the jobs list, or the job-detail view ---
     if s.in_job_detail() {
         render_job_detail(f, s, chunks[1]);
     } else {
-        let main_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(chunks[1]);
-
         let job_items: Vec<ListItem> = s
             .jobs
             .iter()
@@ -501,67 +411,23 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
                 ListItem::new(Line::from(line))
             })
             .collect();
-        let jobs_border = if s.focus_is_jobs() {
-            Color::Yellow
-        } else {
-            Color::Blue
-        };
-        let jobs_highlight = if s.focus_is_jobs() {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
         let jobs_list = List::new(job_items)
             .block(
                 Block::default()
                     .title(" Jobs ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(jobs_border)),
+                    .border_style(Style::default().fg(Color::Yellow)),
             )
-            .highlight_style(jobs_highlight);
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
         let mut jobs_state = ListState::default();
         if !s.jobs.is_empty() {
             jobs_state.select(Some(s.selected_job.min(s.jobs.len() - 1)));
         }
-        f.render_stateful_widget(jobs_list, main_chunks[0], &mut jobs_state);
-
-        let inbox_items: Vec<ListItem> = s
-            .inbox
-            .iter()
-            .map(|p| {
-                ListItem::new(Line::from(format!(
-                    " \u{2753} {} \u{2014} {}",
-                    p.label, p.text
-                )))
-            })
-            .collect();
-        let inbox_border = if s.focus_is_jobs() {
-            Color::Magenta
-        } else {
-            Color::Yellow
-        };
-        let inbox_highlight = if !s.focus_is_jobs() {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        let inbox_list = List::new(inbox_items)
-            .block(
-                Block::default()
-                    .title(" Inbox ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(inbox_border)),
-            )
-            .highlight_style(inbox_highlight);
-        let mut inbox_state = ListState::default();
-        if !s.inbox.is_empty() {
-            inbox_state.select(Some(s.selected.min(s.inbox.len() - 1)));
-        }
-        f.render_stateful_widget(inbox_list, main_chunks[1], &mut inbox_state);
+        f.render_stateful_widget(jobs_list, chunks[1], &mut jobs_state);
     }
 
     // --- Persistent bottom input bar ---
@@ -571,12 +437,11 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(footer);
 
-    let title = format!(" {} ", s.input_target_label());
     let input = Paragraph::new(s.input_buffer())
         .wrap(Wrap { trim: false })
         .block(
             Block::default()
-                .title(title)
+                .title(" Add task ")
                 .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(Color::Yellow)),
         )
@@ -584,9 +449,9 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
     f.render_widget(input, fchunks[0]);
 
     let hint = if s.standby {
-        " ✓ standby · [enter] submit  [shift+enter] newline  [tab] pane  [↑↓] nav  [esc] clear  [q] quit"
+        " ✓ standby · [enter] submit  [shift+enter] newline  [↑↓] jobs  [esc] clear  [q] quit"
     } else {
-        " [enter] submit  [shift+enter] newline  [tab] pane  [↑↓] nav  [esc] clear  [q] quit"
+        " [enter] submit  [shift+enter] newline  [↑↓] jobs  [esc] clear  [q] quit"
     };
     let hint_para = Paragraph::new(Line::from(hint)).style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint_para, fchunks[1]);

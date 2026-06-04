@@ -136,6 +136,48 @@ exit 0
     ws
 }
 
+/// Stub whose MANAGER never rewrites backlog.json (it only refreshes verify.sh and
+/// master.md), for tests that pre-seed broken backlog states the orchestrator must
+/// repair. Architect/builder/customer behave like init_ws_with_stub's.
+#[allow(dead_code)]
+pub fn init_ws_with_keep_backlog_stub() -> PathBuf {
+    let ws = init_ws_with_stub();
+    let stub = r##"#!/bin/bash
+tool="$1"; shift
+ws_state="$WS/.agentloop/state"; res="$WS/.agentloop/results"
+prompt="$*"
+case "$prompt" in
+  *MANAGER*)
+    printf '#!/bin/bash\ntest -f "$PWD/made.txt"\n' > "$WS/.agentloop/verify.sh"; chmod +x "$WS/.agentloop/verify.sh"
+    echo "# updated" > "$ws_state/master.md"
+    ;;
+  *ARCHITECT*)
+    mkdir -p "$ws_state/tasks/task-1"
+    echo "Make the file." > "$ws_state/tasks/task-1/design.md"
+    echo '{"items":[{"id":"task-1-b1","title":"make file","desc":"write made.txt","deps":[],"status":"ready","attempts":0,"acceptance":"made.txt exists"}]}' > "$ws_state/tasks/task-1/builders.json"
+    ;;
+  *BUILDER*)
+    echo made > "$PWD/made.txt"; git add -A; git commit -qm "worker" 2>/dev/null
+    echo '{"status":"done","summary":"made file","files_changed":["made.txt"]}' > "$res/task-1-b1.json"
+    ;;
+  *"SILLY CUSTOMER"*)
+    mkdir -p "$ws_state/tasks/task-1"
+    echo '{"status":"approved","summary":"accepted","acceptance_notes":"made.txt exists"}' > "$ws_state/tasks/task-1/customer.json"
+    echo '{"status":"approved","summary":"accepted"}' > "$res/task-1-customer.json"
+    ;;
+esac
+exit 0
+"##;
+    std::fs::write(ws.join("stub.sh"), stub).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ws.join("stub.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    ws
+}
+
 /// Stub that, as builder, asks a question the FIRST time (needs_input) and completes
 /// the SECOND time (after an answer file exists). Manager seeds one business task.
 #[allow(dead_code)]

@@ -179,6 +179,27 @@ pub fn set_builder_status(
     write_builders(ws, task_id, &v)
 }
 
+/// Flip builders left `in_progress` by an interrupted run back to `ready` so they
+/// re-dispatch (consuming an attempt). Nothing is in flight when repairs run, so
+/// any `in_progress` builder is stale. Returns how many were reset.
+pub fn reset_stale_in_progress_builders(ws: &Path, task_id: &str) -> Result<u32> {
+    let mut v = read_builders(ws, task_id)?;
+    let mut reset = 0u32;
+    if let Some(items) = v["items"].as_array_mut() {
+        for it in items.iter_mut() {
+            if it["status"] == "in_progress" {
+                it["status"] = json!("ready");
+                it["notes"] = json!("stale in_progress from an interrupted run; re-dispatching");
+                reset += 1;
+            }
+        }
+    }
+    if reset > 0 {
+        write_builders(ws, task_id, &v)?;
+    }
+    Ok(reset)
+}
+
 pub fn increment_builder_attempts(ws: &Path, task_id: &str, builder_id: &str) -> Result<()> {
     let mut v = read_builders(ws, task_id)?;
     if let Some(items) = v["items"].as_array_mut() {

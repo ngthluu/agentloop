@@ -11,6 +11,15 @@ pub fn manager_prompt(ws: &Path, max_attempts: u32) -> String {
     let master = std::fs::read_to_string(st.join("master.md")).unwrap_or_default();
     let backlog = std::fs::read_to_string(st.join("backlog.json")).unwrap_or_default();
     let requests = crate::requests::prompt_block(ws).unwrap_or_default();
+    let stuck = state::failed_dep_report(&st.join("backlog.json"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            format!(
+                "\n\nSTUCK ITEMS — these depend on failed items and can never run; reshape or drop them this round:\n{s}"
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"You are the MANAGER for an autonomous app build. Working dir: {ws} (a git repo).
 You own business tasks only.
@@ -31,6 +40,9 @@ Your job each round:
 4. The orchestrator FAILS any item once its attempts reach {max_attempts} (the max_attempts cap).
    So for any item nearing attempts={max_attempts}, reshape it into smaller business outcomes or drop it.
 5. Keep each item business-facing: describe what the user gets, not implementation details.
+6. Statuses you may write are "ready", "blocked", and "failed". NEVER write "in_progress" — the orchestrator owns that transition.
+7. Every id inside any "deps" array must be the id of another item in this backlog.json. Never invent ids and never copy task-local sub-items (ids like "task-3-b2", which live under .agentloop/state/tasks/) into this backlog; the orchestrator strips deps on unknown ids.
+8. If an open item depends on a "failed" item it can never run: reshape or drop it this round.
 
 Completion ownership:
 - Do NOT create status="done" yourself.
@@ -41,13 +53,14 @@ Completion ownership:
 OUTPUT CONTRACT — you MUST overwrite .agentloop/state/backlog.json with valid JSON:
 {{"items":[{{"id":"task-1","title":"User-visible outcome","desc":"What the user needs","deps":[],"status":"ready","attempts":0,"acceptance":"Observable acceptance criteria"}}]}}
 Also rewrite .agentloop/state/master.md as a human-readable status board.
-Do not print the JSON to stdout; write the files.{requests}"#,
+Do not print the JSON to stdout; write the files.{requests}{stuck}"#,
         ws = ws.display(),
         goal = goal,
         master = master,
         backlog = backlog,
         max_attempts = max_attempts,
-        requests = requests
+        requests = requests,
+        stuck = stuck
     )
 }
 

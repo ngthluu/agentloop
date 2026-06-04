@@ -15,6 +15,66 @@ use crate::{architect, customer, manager, spawn, state, task_state, worker, work
 /// TUI / SIGINT / SIGTERM still kills it (no orphaned agent).
 const NO_TIMEOUT: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
 
+/// Canned reply for any question an agent raises: the loop is autonomous, so the
+/// "user" always delegates the decision back to the agent.
+pub const AUTO_ANSWER: &str = "Decide the best option for me — you decide. Pick whatever best serves the goal and the acceptance criteria, record your decision in the result summary, and continue.";
+
+/// Auto-answer a raised question with [`AUTO_ANSWER`]: persist the Q&A, consume the
+/// question file, and flip the asking item ready so it is re-dispatched with the
+/// prior Q&A appended to its prompt.
+pub fn auto_answer(ws: &Path, item_id: &str) -> Result<()> {
+    let bk = ws.join(".agentloop/state/backlog.json");
+    if let Some(task_id) = builder_owner(ws, item_id)? {
+        let question = match crate::inbox::read_question(ws, item_id) {
+            Ok(q) => q.question,
+            Err(_) => builder_item(ws, &task_id, item_id)?
+                .and_then(|i| i["notes"].as_str().map(String::from))
+                .unwrap_or_default(),
+        };
+        crate::inbox::record_answer(ws, item_id, &question, AUTO_ANSWER)?;
+        let _ = crate::inbox::consume_question(ws, item_id);
+        task_state::set_builder_status(
+            ws,
+            &task_id,
+            item_id,
+            "ready",
+            "auto-answered; re-dispatching",
+        )?;
+        return Ok(());
+    }
+
+    let question = match crate::inbox::read_question(ws, item_id) {
+        Ok(q) => q.question,
+        Err(_) => {
+            let v = state::read(&bk)?;
+            state::item(&v, item_id)
+                .and_then(|i| i["notes"].as_str().map(String::from))
+                .unwrap_or_default()
+        }
+    };
+    crate::inbox::record_answer(ws, item_id, &question, AUTO_ANSWER)?;
+    let _ = crate::inbox::consume_question(ws, item_id);
+    state::set_status(&bk, item_id, "ready", "auto-answered; re-dispatching")?;
+    Ok(())
+}
+
+/// Auto-answer every outstanding question file (e.g. left by an interrupted older
+/// run) so the asking items re-enter the dispatchable set this round.
+fn auto_answer_pending(ws: &Path) {
+    let Ok(entries) = std::fs::read_dir(ws.join(".agentloop/questions")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if let Err(e) = auto_answer(ws, id) {
+            eprintln!("auto-answer failed for {id}: {e:#}");
+        }
+    }
+}
+
 /// Spawn an unbounded resolver agent in the main workspace to resolve an in-progress
 /// merge conflict for `id`, then complete the merge. Returns true if the merge is
 /// resolved and committed.
@@ -206,45 +266,6 @@ fn gate_failure_feedback(ws: &Path) -> String {
     }
 }
 
-fn task_blocked_on_builder_question(ws: &Path, task_id: &str) -> Result<bool> {
-    let builders = match task_state::read_builders(ws, task_id) {
-        Ok(builders) => builders,
-        Err(_) => return Ok(false),
-    };
-    let empty = vec![];
-    let has_question = builders["items"]
-        .as_array()
-        .unwrap_or(&empty)
-        .iter()
-        .filter(|item| item["status"] == "blocked")
-        .filter_map(|item| item["id"].as_str())
-        .any(|id| crate::inbox::has_question(ws, id));
-    Ok(has_question && task_state::ready_builders(ws, task_id, 1)?.is_empty())
-}
-
-fn user_blocked_business_count(bk: &Path, ws: &Path) -> Result<i64> {
-    let backlog = state::read(bk)?;
-    let empty = vec![];
-    let mut count = 0i64;
-    for item in backlog["items"].as_array().unwrap_or(&empty) {
-        if !matches!(
-            item["status"].as_str(),
-            Some("ready") | Some("in_progress") | Some("blocked")
-        ) {
-            continue;
-        }
-        let Some(id) = item["id"].as_str() else {
-            continue;
-        };
-        if item["status"] == "blocked" && crate::inbox::has_question(ws, id) {
-            count += 1;
-        } else if task_blocked_on_builder_question(ws, id)? {
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
 fn reopen_unapproved_done_tasks(bk: &Path, ws: &Path) -> Result<u32> {
     let backlog = state::read(bk)?;
     let empty = vec![];
@@ -270,12 +291,68 @@ fn reopen_unapproved_done_tasks(bk: &Path, ws: &Path) -> Result<u32> {
     Ok(ids.len() as u32)
 }
 
+/// Deterministic liveness repairs, run right after the manager each round: the
+/// backlog must never hold open work the orchestrator can never dispatch, or the
+/// loop stalls/standbys with open items and nothing to do.
+fn repair_backlog(bk: &Path, ws: &Path, max_redesigns: u32) -> Result<()> {
+    // 1) Deps on ids missing from the backlog can never be satisfied (e.g. a
+    //    manager that leaked task-local sub-item ids) — drop them.
+    for (id, dep) in state::strip_unknown_deps(bk)? {
+        eprintln!("repair: dropped {id} dep on unknown id {dep}");
+    }
+
+    // 2) Only `ready` items reach the architect, so `in_progress` without a valid
+    //    local plan would never get planned again (manager rewrite / stale resume)
+    //    — flip it back to ready.
+    let backlog = state::read(bk)?;
+    let empty = vec![];
+    for item in backlog["items"].as_array().unwrap_or(&empty) {
+        let Some(id) = item["id"].as_str() else {
+            continue;
+        };
+        if item["status"] == "in_progress" && !task_state::builder_plan_valid(ws, id) {
+            state::set_status(
+                bk,
+                id,
+                "ready",
+                "in_progress without a valid plan; re-architecting",
+            )?;
+        }
+    }
+
+    // 3) A valid plan whose remaining builders can never dispatch (deps on failed
+    //    or abandoned builders) deadlocks its parent — reopen it for redesign.
+    for task_id in active_business_ids(bk, ws)? {
+        if !task_state::builder_plan_valid(ws, &task_id) {
+            continue;
+        }
+        // Builders left in_progress by an interrupted run are stale (nothing is
+        // in flight when repairs run): re-queue them instead of reading their
+        // absence from the dispatchable set as a deadlock.
+        let _ = task_state::reset_stale_in_progress_builders(ws, &task_id)?;
+        if task_state::all_builders_done(ws, &task_id)?
+            || !task_state::ready_builders(ws, &task_id, 1)?.is_empty()
+        {
+            continue;
+        }
+        reopen_parent_for_redesign(
+            bk,
+            ws,
+            &task_id,
+            "builder plan deadlocked: no dispatchable builders remain",
+            max_redesigns,
+        )?;
+    }
+    Ok(())
+}
+
 /// One iteration: manage, architect, dispatch builders, integrate, review. Returns merged count.
 pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporter>) -> Result<u32> {
     let sdir = ws.join(".agentloop/state");
     let ldir = ws.join(format!(".agentloop/logs/iter-{n}"));
     std::fs::create_dir_all(&ldir)?;
     std::fs::create_dir_all(ws.join(".agentloop/results"))?;
+    auto_answer_pending(ws);
     let bk = sdir.join("backlog.json");
     let itimeout = Duration::from_secs(cfg.item_timeout_sec());
     let maxpar = cfg.max_parallel() as usize;
@@ -298,6 +375,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     }
     reporter.status("manager", "done", &mtool, &mmodel);
     let _ = reopen_unapproved_done_tasks(&bk, ws)?;
+    repair_backlog(&bk, ws, maxatt)?;
 
     let ready_business = state::ready_items(&bk, ws, usize::MAX)?;
     for id in &ready_business {
@@ -439,18 +517,15 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         let branch = format!("item/{id}");
 
         if status == "needs_input" {
-            // Agent is blocked on a user decision. Surface the question; block the
-            // item; do not merge. The question file lives in the main workspace
-            // (.agentloop/questions/<id>.json), so it survives worktree removal.
-            if let Ok(q) = crate::inbox::read_question(ws, id) {
-                let label = builder_item(ws, task_id, id)
-                    .ok()
-                    .flatten()
-                    .as_ref()
-                    .and_then(|i| i["title"].as_str().map(String::from))
-                    .unwrap_or_default();
-                reporter.question(id, &label, &q.question, &q.context);
-                task_state::set_builder_status(ws, task_id, id, "blocked", &q.question)?;
+            // Autonomous mode: never park the item on a human. Persist the canned
+            // "you decide" answer and re-dispatch with the prior Q&A appended to
+            // the builder prompt. Re-dispatch consumes an attempt, so a builder
+            // that asks forever still hits max_attempts -> redesign.
+            if crate::inbox::has_question(ws, id) {
+                if let Err(e) = auto_answer(ws, id) {
+                    eprintln!("auto-answer failed for {id}: {e:#}");
+                    task_state::set_builder_status(ws, task_id, id, "ready", "auto-answer failed")?;
+                }
             } else {
                 // Malformed/missing question file: treat as a normal non-done bounce.
                 task_state::set_builder_status(
@@ -460,8 +535,8 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "ready",
                     "needs_input without a question file",
                 )?;
-                reporter.status(id, "bounced", "", "");
             }
+            reporter.status(id, "bounced", "", "");
             worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
             let _ = std::fs::remove_file(&rfile);
             continue;
@@ -566,40 +641,6 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     Ok(merged)
 }
 
-/// Apply a user's answer to a blocked item: persist it, consume the question,
-/// flip the item blocked->ready so it is re-dispatched with the prior Q&A.
-pub fn apply_answer(ws: &Path, item_id: &str, text: &str) -> Result<()> {
-    let bk = ws.join(".agentloop/state/backlog.json");
-    if let Some(task_id) = builder_owner(ws, item_id)? {
-        let question = match crate::inbox::read_question(ws, item_id) {
-            Ok(q) => q.question,
-            Err(_) => builder_item(ws, &task_id, item_id)?
-                .and_then(|i| i["notes"].as_str().map(String::from))
-                .unwrap_or_default(),
-        };
-        crate::inbox::record_answer(ws, item_id, &question, text)?;
-        let _ = crate::inbox::consume_question(ws, item_id);
-        task_state::set_builder_status(ws, &task_id, item_id, "ready", "answered; re-dispatching")?;
-        return Ok(());
-    }
-
-    // The question text: prefer the live question file; fall back to the item's notes
-    // (where the needs_input handler stashed it) if the file was already consumed.
-    let question = match crate::inbox::read_question(ws, item_id) {
-        Ok(q) => q.question,
-        Err(_) => {
-            let v = state::read(&bk)?;
-            state::item(&v, item_id)
-                .and_then(|i| i["notes"].as_str().map(String::from))
-                .unwrap_or_default()
-        }
-    };
-    crate::inbox::record_answer(ws, item_id, &question, text)?;
-    let _ = crate::inbox::consume_question(ws, item_id);
-    state::set_status(&bk, item_id, "ready", "answered; re-dispatching")?;
-    Ok(())
-}
-
 /// Drive iterations until DONE (0), cap/stall (1), or hard error (Err).
 pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result<i32> {
     let sdir = ws.join(".agentloop/state");
@@ -630,14 +671,6 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
             return Ok(0);
         }
 
-        // Only a genuine user-question block (not a manager dependency-block, which
-        // ready_items now dispatches autonomously) should halt a headless run.
-        let user_blocked = user_blocked_business_count(&bk, ws)?;
-        if open > 0 && open == user_blocked {
-            eprintln!("STOP: blocked on user input (headless)");
-            return Ok(1);
-        }
-
         if merged == 0 && gate_state == prev_gate {
             stalls += 1;
             if stalls >= 2 {
@@ -654,8 +687,8 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
 }
 
 /// Interactive driver with a standby state machine. DONE/cap/stall transitions to
-/// standby (idle, awaiting a command) instead of exiting. AddTask / AnswerQuestion
-/// re-engage with a fresh budget window; Quit exits. Tasks can also be added mid-run.
+/// standby (idle, awaiting a command) instead of exiting. AddTask re-engages with a
+/// fresh budget window; Quit exits. Tasks can also be added mid-run.
 pub async fn run_interactive(
     cfg: &Config,
     ws: &Path,
@@ -683,8 +716,8 @@ pub async fn run_interactive(
                 }
                 break;
             }
-            // Stray answer/add-task before the run starts: ignore.
-            Some(Command::AnswerQuestion { .. }) | Some(Command::AddTask { .. }) => {}
+            // Stray add-task before the run starts: ignore.
+            Some(Command::AddTask { .. }) => {}
         }
     }
 
@@ -695,9 +728,6 @@ pub async fn run_interactive(
             while let Ok(cmd) = crx.try_recv() {
                 match cmd {
                     Command::Quit => return Ok(0),
-                    Command::AnswerQuestion { item_id, text } => {
-                        let _ = apply_answer(ws, &item_id, &text);
-                    }
                     Command::AddTask { request } => {
                         let _ = crate::requests::append(ws, &request);
                     }
@@ -721,29 +751,10 @@ pub async fn run_interactive(
             let grc = gate(ws);
             let gate_state = if grc == 0 { "pass" } else { "fail" };
             let open = state::open_count(&bk)?;
-            let user_blocked = user_blocked_business_count(&bk, ws)?;
             reporter.iteration(n, merged, gate_state, open);
 
             if gate_state == "pass" && open == 0 {
                 break 'working true;
-            }
-
-            // Only user-question blocks remain (dependency-blocks are dispatched by
-            // ready_items): block for a command (answer/add-task/quit).
-            if open > 0 && open == user_blocked {
-                match crx.recv().await {
-                    None | Some(Command::Quit) => return Ok(0),
-                    Some(Command::AnswerQuestion { item_id, text }) => {
-                        let _ = apply_answer(ws, &item_id, &text);
-                    }
-                    Some(Command::AddTask { request }) => {
-                        let _ = crate::requests::append(ws, &request);
-                    }
-                    Some(Command::StartRun { .. }) => {}
-                }
-                stalls = 0;
-                prev_gate = gate_state.to_string();
-                continue 'working;
             }
 
             if merged == 0 && gate_state == prev_gate {
@@ -763,9 +774,6 @@ pub async fn run_interactive(
             reporter.standby();
             match crx.recv().await {
                 None | Some(Command::Quit) => return Ok(0),
-                Some(Command::AnswerQuestion { item_id, text }) => {
-                    let _ = apply_answer(ws, &item_id, &text);
-                }
                 Some(Command::AddTask { request }) => {
                     let _ = crate::requests::append(ws, &request);
                 }
@@ -863,6 +871,104 @@ mod tests {
             "plan is kept for inspection when the cap is hit"
         );
 
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repair_backlog_leaves_healthy_tasks_alone() {
+        let ws = tmp_ws("orch-healthy");
+        setup(&ws);
+        let bk = ws.join(".agentloop/state/backlog.json");
+
+        repair_backlog(&bk, &ws, 3).unwrap();
+
+        let v = state::read(&bk).unwrap();
+        assert_eq!(state::item(&v, "task-1").unwrap()["status"], "in_progress");
+        assert!(task_state::builders_path(&ws, "task-1").exists());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repair_backlog_flips_in_progress_without_plan_to_ready() {
+        let ws = tmp_ws("orch-noplan");
+        setup(&ws);
+        std::fs::remove_file(ws.join(".agentloop/state/tasks/task-1/builders.json")).unwrap();
+        let bk = ws.join(".agentloop/state/backlog.json");
+
+        repair_backlog(&bk, &ws, 3).unwrap();
+
+        let v = state::read(&bk).unwrap();
+        let task = state::item(&v, "task-1").unwrap();
+        assert_eq!(task["status"], "ready");
+        assert!(task["notes"].as_str().unwrap().contains("re-architecting"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repair_backlog_reopens_deadlocked_builder_plan() {
+        let ws = tmp_ws("orch-deadlock");
+        setup(&ws);
+        // Remaining ready builder deps on a failed one: never dispatchable.
+        std::fs::write(
+            ws.join(".agentloop/state/tasks/task-1/builders.json"),
+            r#"{"items":[
+                {"id":"task-1-b1","title":"t","desc":"d","deps":[],"status":"failed","attempts":3,"acceptance":"a"},
+                {"id":"task-1-b2","title":"t","desc":"d","deps":["task-1-b1"],"status":"ready","attempts":0,"acceptance":"a"}
+            ]}"#,
+        )
+        .unwrap();
+        let bk = ws.join(".agentloop/state/backlog.json");
+
+        repair_backlog(&bk, &ws, 3).unwrap();
+
+        let v = state::read(&bk).unwrap();
+        assert_eq!(state::item(&v, "task-1").unwrap()["status"], "ready");
+        assert!(
+            !task_state::builders_path(&ws, "task-1").exists(),
+            "deadlocked plan is invalidated for redesign"
+        );
+        assert_eq!(
+            task_state::read_redesign(&ws, "task-1").0,
+            1,
+            "deadlock consumes a redesign"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repair_backlog_requeues_stale_in_progress_builders_instead_of_redesigning() {
+        let ws = tmp_ws("orch-stale");
+        setup(&ws);
+        // One builder done, one left in_progress by an interrupted run.
+        std::fs::write(
+            ws.join(".agentloop/state/tasks/task-1/builders.json"),
+            r#"{"items":[
+                {"id":"task-1-b1","title":"t","desc":"d","deps":[],"status":"done","attempts":1,"acceptance":"a"},
+                {"id":"task-1-b2","title":"t","desc":"d","deps":[],"status":"in_progress","attempts":1,"acceptance":"a"}
+            ]}"#,
+        )
+        .unwrap();
+        let bk = ws.join(".agentloop/state/backlog.json");
+
+        repair_backlog(&bk, &ws, 3).unwrap();
+
+        let builders = task_state::read_builders(&ws, "task-1").unwrap();
+        assert_eq!(
+            task_state::item(&builders, "task-1-b2").unwrap()["status"],
+            "ready",
+            "stale builder is re-queued, not redesigned away"
+        );
+        assert!(
+            task_state::builders_path(&ws, "task-1").exists(),
+            "plan with done work is kept"
+        );
+        assert_eq!(
+            task_state::read_redesign(&ws, "task-1").0,
+            0,
+            "no redesign is burned for a crash orphan"
+        );
+        let v = state::read(&bk).unwrap();
+        assert_eq!(state::item(&v, "task-1").unwrap()["status"], "in_progress");
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

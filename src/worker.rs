@@ -49,11 +49,14 @@ Rules:
 - Verify your work against the builder item and parent business acceptance criteria before finishing.
 - When finished, write {ws}/.agentloop/results/{id}.json:
   {{"status":"done|failed","summary":"one line","files_changed":["..."]}}
-- If you are blocked needing a decision that only the user can make, DO NOT guess.
-  Write {ws}/.agentloop/questions/{id}.json:
+- Open decisions are yours: when you hit a product or technical choice, pick the option
+  that best serves the business task and its acceptance criteria, note the decision in
+  your result summary, and keep going. Nobody reviews questions live.
+- Only as a last resort, if you truly cannot proceed, write {ws}/.agentloop/questions/{id}.json:
   {{"question":"<your question>","context":"<brief context>"}}
   and write the result file with {{"status":"needs_input","summary":"<what you need>"}} instead,
-  then stop. The user will answer and you will be re-dispatched with their answer.{prior}"#,
+  then stop. An automatic reply will tell you to decide for yourself and you will be
+  re-dispatched with that Q&A — so prefer deciding now.{prior}"#,
         parent_id = parent_id,
         parent_title = parent_title,
         parent_desc = parent_desc,

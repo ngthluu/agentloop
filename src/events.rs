@@ -11,8 +11,6 @@ pub trait Reporter: Send + Sync {
     fn status(&self, id: &str, status: &str, tool: &str, model: &str);
     /// End-of-iteration summary line.
     fn iteration(&self, n: u32, merged: u32, gate: &str, open: i64);
-    /// An agent raised a question for the user. Default: no-op.
-    fn question(&self, _item_id: &str, _label: &str, _text: &str, _context: &str) {}
     /// The loop entered the standby state (Phase 3). Default: no-op.
     fn standby(&self) {}
 }
@@ -40,9 +38,6 @@ impl Reporter for EventLineReporter {
     fn iteration(&self, n: u32, merged: u32, gate: &str, open: i64) {
         eprintln!("iter {n}: merged={merged} gate={gate} open={open}");
     }
-    fn question(&self, item_id: &str, _label: &str, text: &str, _context: &str) {
-        eprintln!("{}  question  {:<10} {}", hms(), item_id, text);
-    }
     fn standby(&self) {
         eprintln!("=== standby: waiting for input ===");
     }
@@ -62,12 +57,6 @@ pub enum Event {
         id: String,
         status: String,
     },
-    QuestionRaised {
-        item_id: String,
-        label: String,
-        text: String,
-        context: String,
-    },
     Iteration {
         n: u32,
         merged: u32,
@@ -82,7 +71,6 @@ pub enum Event {
 #[derive(Debug, Clone)]
 pub enum Command {
     StartRun { goal: String },
-    AnswerQuestion { item_id: String, text: String },
     AddTask { request: String },
     Quit,
 }
@@ -120,14 +108,6 @@ impl Reporter for ChannelReporter {
             merged,
             gate: gate.into(),
             open,
-        });
-    }
-    fn question(&self, item_id: &str, label: &str, text: &str, context: &str) {
-        let _ = self.tx.send(Event::QuestionRaised {
-            item_id: item_id.into(),
-            label: label.into(),
-            text: text.into(),
-            context: context.into(),
         });
     }
     fn standby(&self) {
