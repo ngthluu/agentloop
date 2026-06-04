@@ -156,3 +156,40 @@ fn inbox_pane_scrolls_to_keep_selection_visible() {
         "first question scrolled out of view"
     );
 }
+
+#[test]
+fn customer_review_statuses_render_glyphs_not_question_mark() {
+    let mut s = started("goal");
+    s.apply(Event::JobDispatched {
+        id: "task-1-customer".into(),
+        label: "customer review".into(),
+        tool: "claude".into(),
+        model: "sonnet".into(),
+        log_path: None,
+    });
+    s.apply(Event::JobStatus {
+        id: "task-1-customer".into(),
+        status: "approved".into(),
+    });
+    let backend = TestBackend::new(80, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+    assert!(
+        find(&term, "✓ customer review").is_some(),
+        "approved renders ✓"
+    );
+    assert!(
+        find(&term, "? customer review").is_none(),
+        "no ? for approved"
+    );
+
+    s.apply(Event::JobStatus {
+        id: "task-1-customer".into(),
+        status: "rejected".into(),
+    });
+    term.draw(|f| tui::render(f, &s)).unwrap();
+    assert!(
+        find(&term, "✗ customer review").is_some(),
+        "rejected renders ✗"
+    );
+}

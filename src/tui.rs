@@ -113,9 +113,7 @@ impl AppState {
             }
             Event::JobStatus { id, status } => {
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
-                    let terminal =
-                        matches!(status.as_str(), "merged" | "done" | "failed" | "bounced");
-                    if terminal && j.frozen.is_none() {
+                    if is_terminal_status(&status) && j.frozen.is_none() {
                         j.frozen = j.started.map(|s| s.elapsed());
                     }
                     j.status = status;
@@ -414,12 +412,24 @@ pub fn tail_file(path: &std::path::Path, max_lines: usize, max_bytes: u64) -> Ve
     }
 }
 
+/// Job statuses that end the working timer (the job will not run further).
+/// Must cover every terminal status the orchestrator reports: merged/done/failed/
+/// bounced for build jobs, approved/rejected for customer reviews.
+fn is_terminal_status(status: &str) -> bool {
+    matches!(
+        status,
+        "merged" | "done" | "failed" | "bounced" | "approved" | "rejected"
+    )
+}
+
 fn status_glyph(status: &str) -> &'static str {
     match status {
         "running" => "●",
         "merged" => "✓",
         "done" => "✓",
+        "approved" => "✓",
         "failed" => "✗",
+        "rejected" => "✗",
         "bounced" => "↺",
         "queued" => "·",
         _ => "?",

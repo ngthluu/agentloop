@@ -134,6 +134,27 @@ fn typing_then_enter_answers_selected_question() {
 }
 
 #[test]
+fn customer_review_statuses_freeze_timer() {
+    for status in ["approved", "rejected"] {
+        let mut s = AppState::new("g".into());
+        s.apply(Event::JobDispatched {
+            id: "task-1-customer".into(),
+            label: "customer review".into(),
+            tool: "claude".into(),
+            model: "sonnet".into(),
+            log_path: None,
+        });
+        s.apply(Event::JobStatus {
+            id: "task-1-customer".into(),
+            status: status.into(),
+        });
+        let j = s.jobs.iter().find(|j| j.id == "task-1-customer").unwrap();
+        assert!(j.frozen.is_some(), "{status} must freeze the working timer");
+        assert_eq!(j.status, status);
+    }
+}
+
+#[test]
 fn typing_then_enter_adds_task_when_no_question() {
     let mut s = start("g");
     // No questions: target is Add task.
