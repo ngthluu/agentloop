@@ -132,3 +132,80 @@ fn increment_attempts() {
         .unwrap();
     assert_eq!(it3["attempts"], 1);
 }
+
+#[test]
+fn strip_unknown_deps_removes_only_unsatisfiable_deps() {
+    let dir = std::env::temp_dir().join(format!(
+        "strip-deps-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bk = dir.join("backlog.json");
+    std::fs::write(
+        &bk,
+        r#"{"items":[
+            {"id":"task-1","title":"a","desc":"d","deps":[],"status":"done","attempts":0,"acceptance":"x"},
+            {"id":"task-2","title":"b","desc":"d","deps":["task-1","task-ghost"],"status":"ready","attempts":0,"acceptance":"x"},
+            {"id":"task-3","title":"c","desc":"d","deps":["task-2"],"status":"ready","attempts":0,"acceptance":"x"}
+        ]}"#,
+    )
+    .unwrap();
+
+    let removed = state::strip_unknown_deps(&bk).unwrap();
+    assert_eq!(
+        removed,
+        vec![("task-2".to_string(), "task-ghost".to_string())]
+    );
+
+    let v = state::read(&bk).unwrap();
+    assert_eq!(
+        state::item(&v, "task-2").unwrap()["deps"],
+        serde_json::json!(["task-1"]),
+        "only the unknown dep is removed"
+    );
+    assert!(state::item(&v, "task-2").unwrap()["notes"]
+        .as_str()
+        .unwrap()
+        .contains("unknown"));
+    assert_eq!(
+        state::item(&v, "task-3").unwrap()["deps"],
+        serde_json::json!(["task-2"]),
+        "valid deps are untouched"
+    );
+    // Second pass is a no-op.
+    assert!(state::strip_unknown_deps(&bk).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn failed_dep_report_lists_open_items_behind_failed_items() {
+    let dir = std::env::temp_dir().join(format!(
+        "failed-deps-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bk = dir.join("backlog.json");
+    std::fs::write(
+        &bk,
+        r#"{"items":[
+            {"id":"task-1","title":"a","desc":"d","deps":[],"status":"failed","attempts":3,"acceptance":"x"},
+            {"id":"task-2","title":"b","desc":"d","deps":["task-1"],"status":"ready","attempts":0,"acceptance":"x"},
+            {"id":"task-3","title":"c","desc":"d","deps":[],"status":"ready","attempts":0,"acceptance":"x"}
+        ]}"#,
+    )
+    .unwrap();
+
+    let report = state::failed_dep_report(&bk).unwrap();
+    assert!(
+        report.contains("task-2 depends on failed task-1"),
+        "{report}"
+    );
+    assert!(!report.contains("task-3"), "healthy items are not reported");
+    let _ = std::fs::remove_dir_all(&dir);
+}

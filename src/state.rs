@@ -113,3 +113,91 @@ pub fn increment_attempts(path: &Path, id: &str) -> Result<()> {
 pub fn item<'a>(v: &'a Value, id: &str) -> Option<&'a Value> {
     v["items"].as_array()?.iter().find(|i| i["id"] == json!(id))
 }
+
+/// Remove deps that reference ids not present in the backlog at all — they can
+/// never be satisfied (the `done` set can never include them), so the item would
+/// sit open forever. Only open items (ready/in_progress/blocked) are repaired.
+/// Returns the removed (item_id, dep_id) pairs; each repaired item gets a note.
+pub fn strip_unknown_deps(path: &Path) -> Result<Vec<(String, String)>> {
+    let mut v = read(path)?;
+    let empty = vec![];
+    let ids: HashSet<String> = v["items"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(str::to_string))
+        .collect();
+    let mut removed: Vec<(String, String)> = Vec::new();
+    if let Some(items) = v["items"].as_array_mut() {
+        for it in items.iter_mut() {
+            if !matches!(
+                it["status"].as_str(),
+                Some("ready") | Some("in_progress") | Some("blocked")
+            ) {
+                continue;
+            }
+            let Some(id) = it["id"].as_str().map(str::to_string) else {
+                continue;
+            };
+            let Some(deps) = it.get_mut("deps").and_then(|d| d.as_array_mut()) else {
+                continue;
+            };
+            let mut gone: Vec<String> = Vec::new();
+            deps.retain(|d| match d.as_str() {
+                Some(dep) if !ids.contains(dep) => {
+                    gone.push(dep.to_string());
+                    false
+                }
+                _ => true,
+            });
+            if !gone.is_empty() {
+                it["notes"] = json!(format!("removed deps on unknown ids: {}", gone.join(", ")));
+                removed.extend(gone.into_iter().map(|g| (id.clone(), g)));
+            }
+        }
+    }
+    if !removed.is_empty() {
+        write_atomic(path, &v)?;
+    }
+    Ok(removed)
+}
+
+/// Lines describing open items that depend on `failed` items (they can never run
+/// until the manager reshapes them), or "" when there are none. Used to build the
+/// manager-prompt repair section.
+pub fn failed_dep_report(path: &Path) -> Result<String> {
+    let v = read(path)?;
+    let empty = vec![];
+    let items = v["items"].as_array().unwrap_or(&empty);
+    let failed: HashSet<&str> = items
+        .iter()
+        .filter(|i| i["status"] == "failed")
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    let mut out = String::new();
+    for it in items {
+        if !matches!(
+            it["status"].as_str(),
+            Some("ready") | Some("in_progress") | Some("blocked")
+        ) {
+            continue;
+        }
+        let Some(id) = it["id"].as_str() else {
+            continue;
+        };
+        let bad: Vec<&str> = it
+            .get("deps")
+            .and_then(|d| d.as_array())
+            .map(|deps| {
+                deps.iter()
+                    .filter_map(|d| d.as_str())
+                    .filter(|d| failed.contains(d))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !bad.is_empty() {
+            out.push_str(&format!("  - {id} depends on failed {}\n", bad.join(", ")));
+        }
+    }
+    Ok(out)
+}
