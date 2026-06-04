@@ -99,6 +99,14 @@ fn builder_prompt_uses_parent_task_and_design() {
     assert!(p.contains("TECHNICAL DESIGN"));
     assert!(p.contains("Build importer with streaming parse."));
     assert!(p.contains(".agentloop/results/builder-1.json"));
+    assert!(
+        p.contains("Open decisions are yours"),
+        "builders are told to decide autonomously"
+    );
+    assert!(
+        p.contains("An automatic reply will tell you to decide for yourself"),
+        "builders know questions are auto-answered"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 
