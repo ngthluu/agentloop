@@ -30,6 +30,9 @@ struct Args {
     /// Plan only; do not dispatch workers
     #[arg(long)]
     dry_run: bool,
+    /// Print the bounce/failure troubleshooting report for the workspace and exit
+    #[arg(long)]
+    report: bool,
 }
 
 fn git(repo: &Path, args: &[&str]) -> bool {
@@ -149,6 +152,11 @@ pub async fn run() -> Result<()> {
     let started = std::time::Instant::now();
     let args = Args::parse();
     let ws = args.workspace.clone().unwrap_or(std::env::current_dir()?);
+    if args.report {
+        let ws = ws.canonicalize().unwrap_or(ws);
+        print!("{}", crate::history::report(&ws));
+        return Ok(());
+    }
     if args.fresh {
         let _ = std::fs::remove_dir_all(ws.join(".agentloop"));
     }

@@ -57,6 +57,112 @@ pub fn read_events(ws: &Path) -> Vec<Value> {
         .collect()
 }
 
+/// Human-readable troubleshooting report: every bounced/failed/rejected event
+/// ever recorded, plus what is failed right now in the backlog and in each
+/// task's builder plan.
+pub fn report(ws: &Path) -> String {
+    let mut out = String::new();
+    let events = read_events(ws);
+    out.push_str(&format!("=== agentloop report — {} ===\n", ws.display()));
+    if events.is_empty() {
+        out.push_str("(no events recorded yet — events.jsonl is written by runs from this version on)\n");
+    }
+
+    let pick = |status: &str| -> Vec<&Value> {
+        events
+            .iter()
+            .filter(|e| e["kind"] == "status" && e["status"] == status)
+            .collect()
+    };
+    for (title, status) in [
+        ("BOUNCED", "bounced"),
+        ("FAILED", "failed"),
+        ("REJECTED (customer)", "rejected"),
+    ] {
+        let evs = pick(status);
+        out.push_str(&format!("\n{title} events: {}\n", evs.len()));
+        for e in evs {
+            out.push_str(&format!(
+                "  {}  {:<24} {}\n",
+                e["ts"].as_str().unwrap_or(""),
+                e["id"].as_str().unwrap_or(""),
+                e["reason"].as_str().unwrap_or("")
+            ));
+        }
+    }
+
+    let redesigns: Vec<&Value> = events.iter().filter(|e| e["kind"] == "task").collect();
+    out.push_str(&format!(
+        "\nTASK redesign/failure events: {}\n",
+        redesigns.len()
+    ));
+    for e in redesigns {
+        out.push_str(&format!(
+            "  {}  {:<24} {:<8} {}\n",
+            e["ts"].as_str().unwrap_or(""),
+            e["id"].as_str().unwrap_or(""),
+            e["status"].as_str().unwrap_or(""),
+            e["reason"].as_str().unwrap_or("")
+        ));
+    }
+
+    let bk = ws.join(".agentloop/state/backlog.json");
+    if let Ok(v) = crate::state::read(&bk) {
+        let empty = vec![];
+        let failed: Vec<&Value> = v["items"]
+            .as_array()
+            .unwrap_or(&empty)
+            .iter()
+            .filter(|i| i["status"] == "failed")
+            .collect();
+        out.push_str(&format!(
+            "\nbacklog items currently failed: {}\n",
+            failed.len()
+        ));
+        for i in failed {
+            out.push_str(&format!(
+                "  {}  {}\n    note: {}\n",
+                i["id"].as_str().unwrap_or(""),
+                i["title"].as_str().unwrap_or(""),
+                i["notes"].as_str().unwrap_or("").lines().next().unwrap_or("")
+            ));
+        }
+    }
+
+    out.push_str("\nbuilders currently failed:\n");
+    let mut none = true;
+    if let Ok(entries) = std::fs::read_dir(ws.join(".agentloop/state/tasks")) {
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        for task_id in names {
+            let Ok(b) = crate::task_state::read_builders(ws, &task_id) else {
+                continue;
+            };
+            let empty = vec![];
+            for i in b["items"].as_array().unwrap_or(&empty) {
+                if i["status"] == "failed" {
+                    none = false;
+                    out.push_str(&format!(
+                        "  {}/{} (attempts {})  {}\n",
+                        task_id,
+                        i["id"].as_str().unwrap_or(""),
+                        i["attempts"].as_u64().unwrap_or(0),
+                        i["notes"].as_str().unwrap_or("").lines().next().unwrap_or("")
+                    ));
+                }
+            }
+        }
+    }
+    if none {
+        out.push_str("  (none)\n");
+    }
+    out
+}
+
 /// Move `path` into `dir` with a timestamp prefix so repeats never overwrite.
 /// Missing source is a no-op. This is how loop artifacts are retired: archived
 /// for troubleshooting, never deleted.

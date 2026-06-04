@@ -82,6 +82,51 @@ fn archive_file_missing_source_is_noop() {
 }
 
 #[test]
+fn report_lists_bounced_failed_events_and_current_failures() {
+    use serde_json::json;
+
+    let ws = tmp_ws("hist-report");
+    let st = ws.join(".agentloop/state");
+    std::fs::create_dir_all(st.join("tasks/task-9")).unwrap();
+
+    history::record(&ws, "status", "task-1-b1", "bounced", "needs_input: auto-answered");
+    history::record(&ws, "status", "task-9-b2", "failed", "did not report done");
+    history::record(&ws, "task", "task-9", "failed", "redesign cap (3) reached");
+
+    std::fs::write(
+        st.join("backlog.json"),
+        serde_json::to_vec(&json!({"items":[{
+            "id":"task-9","title":"browse history","deps":[],"status":"failed",
+            "attempts":0,"acceptance":"a","notes":"redesign cap (3) reached"
+        }]}))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        st.join("tasks/task-9/builders.json"),
+        serde_json::to_vec(&json!({"items":[{
+            "id":"task-9-b2","title":"t","desc":"d","deps":[],"status":"failed",
+            "attempts":3,"acceptance":"a","notes":"exceeded max_attempts (3)"
+        }]}))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let r = history::report(&ws);
+    assert!(r.contains("BOUNCED events: 1"), "got:\n{r}");
+    assert!(r.contains("task-1-b1"));
+    assert!(r.contains("needs_input: auto-answered"));
+    assert!(r.contains("FAILED events: 1"));
+    assert!(r.contains("TASK redesign/failure events: 1"));
+    assert!(r.contains("backlog items currently failed: 1"));
+    assert!(r.contains("browse history"));
+    assert!(r.contains("task-9/task-9-b2 (attempts 3)"));
+    assert!(r.contains("exceeded max_attempts (3)"));
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn recording_reporter_persists_dispatch_and_status() {
     use agentloop::events::{EventLineReporter, RecordingReporter, Reporter};
     use std::sync::Arc;
