@@ -30,7 +30,7 @@ fn one_line(reason: &str, max: usize) -> String {
 fn try_record(ws: &Path, kind: &str, id: &str, status: &str, reason: &str) -> Result<()> {
     let path = events_path(ws);
     let dir = path.parent().context("events path has no parent")?;
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let ev = json!({
         "ts": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         "kind": kind,
@@ -41,8 +41,9 @@ fn try_record(ws: &Path, kind: &str, id: &str, status: &str, reason: &str) -> Re
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)?;
-    writeln!(f, "{ev}")?;
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    writeln!(f, "{ev}").with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -80,6 +81,6 @@ pub fn archive_file(path: &Path, dir: &Path) -> Result<()> {
         std::fs::copy(path, &dest)
             .map(|_| ())
             .and_then(|_| std::fs::remove_file(path))
-    })?;
+    }).with_context(|| format!("archive {} -> {}", path.display(), dest.display()))?;
     Ok(())
 }

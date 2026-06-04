@@ -62,6 +62,15 @@ fn archive_file_moves_without_overwriting() {
         2,
         "second archive does not overwrite the first"
     );
+    let contents: std::collections::HashSet<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert!(
+        contents.contains("one") && contents.contains("two"),
+        "both archived file contents preserved"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 
