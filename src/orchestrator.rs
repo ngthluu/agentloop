@@ -134,30 +134,51 @@ async fn resolve_conflict(
     Ok(true)
 }
 
-/// Run verify.sh; capture output to last_gate.txt; return its exit code (1 if absent).
+/// Run verify.sh; capture output to last_gate.txt (latest run) and append it to
+/// logs/gate.log (every run, forever); return its exit code (1 if absent).
 pub fn gate(ws: &Path) -> i32 {
     let gate = ws.join(".agentloop/verify.sh");
     let out = ws.join(".agentloop/state/last_gate.txt");
-    if gate.exists() {
-        let result = std::process::Command::new("/bin/bash")
+    let (code, buf): (i32, Vec<u8>) = if gate.exists() {
+        match std::process::Command::new("/bin/bash")
             .arg(&gate)
             .current_dir(ws)
-            .output();
-        match result {
+            .output()
+        {
             Ok(o) => {
                 let mut buf = o.stdout.clone();
                 buf.extend_from_slice(&o.stderr);
-                let _ = std::fs::write(&out, &buf);
-                o.status.code().unwrap_or(1)
+                (o.status.code().unwrap_or(1), buf)
             }
-            Err(_) => {
-                let _ = std::fs::write(&out, "verify.sh spawn failed");
-                1
-            }
+            Err(_) => (1, b"verify.sh spawn failed".to_vec()),
         }
     } else {
-        let _ = std::fs::write(&out, "no verify.sh yet");
-        1
+        (1, b"no verify.sh yet".to_vec())
+    };
+    let _ = std::fs::write(&out, &buf);
+    append_gate_log(ws, code, &buf);
+    code
+}
+
+/// Append one gate run (timestamp, rc, full output) to `.agentloop/logs/gate.log`.
+fn append_gate_log(ws: &Path, code: i32, output: &[u8]) {
+    use std::io::Write;
+    let log = ws.join(".agentloop/logs/gate.log");
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
+        let _ = writeln!(
+            f,
+            "=== {} rc={code} ===",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+        let _ = f.write_all(output);
+        let _ = writeln!(f);
     }
 }
 
@@ -970,6 +991,26 @@ mod tests {
             1,
             "deadlock consumes a redesign"
         );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn gate_appends_every_run_to_gate_log() {
+        let ws = tmp_ws("orch-gatelog");
+        std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
+
+        assert_eq!(gate(&ws), 1); // no verify.sh yet
+        std::fs::write(ws.join(".agentloop/verify.sh"), "#!/bin/bash\nexit 0\n").unwrap();
+        assert_eq!(gate(&ws), 0);
+
+        let log = std::fs::read_to_string(ws.join(".agentloop/logs/gate.log")).unwrap();
+        assert_eq!(log.matches("=== ").count(), 2, "both runs recorded");
+        assert!(log.contains("rc=1") && log.contains("rc=0"));
+        assert!(
+            ws.join(".agentloop/state/last_gate.txt").exists(),
+            "latest-run file still maintained"
+        );
+
         let _ = std::fs::remove_dir_all(&ws);
     }
 
