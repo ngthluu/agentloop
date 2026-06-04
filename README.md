@@ -143,6 +143,10 @@ Nothing the loop produces is deleted:
   customer reviews, and redesign counters.
 - `.agentloop/logs/answered-<id>-<ts>.json` — consumed agent questions.
 
+These files and archive dirs grow without bound by design (they are the audit
+trail); prune them manually — or start over with `--fresh` — if a long-lived
+workspace gets too big.
+
 Before running, agentloop verifies that every CLI tool the config routes roles
 to (claude/codex) is installed, and exits with install instructions otherwise.
 
