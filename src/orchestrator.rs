@@ -323,8 +323,14 @@ fn repair_backlog(bk: &Path, ws: &Path, max_redesigns: u32) -> Result<()> {
     // 3) A valid plan whose remaining builders can never dispatch (deps on failed
     //    or abandoned builders) deadlocks its parent — reopen it for redesign.
     for task_id in active_business_ids(bk, ws)? {
-        if !task_state::builder_plan_valid(ws, &task_id)
-            || task_state::all_builders_done(ws, &task_id)?
+        if !task_state::builder_plan_valid(ws, &task_id) {
+            continue;
+        }
+        // Builders left in_progress by an interrupted run are stale (nothing is
+        // in flight when repairs run): re-queue them instead of reading their
+        // absence from the dispatchable set as a deadlock.
+        let _ = task_state::reset_stale_in_progress_builders(ws, &task_id)?;
+        if task_state::all_builders_done(ws, &task_id)?
             || !task_state::ready_builders(ws, &task_id, 1)?.is_empty()
         {
             continue;
@@ -926,6 +932,43 @@ mod tests {
             1,
             "deadlock consumes a redesign"
         );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repair_backlog_requeues_stale_in_progress_builders_instead_of_redesigning() {
+        let ws = tmp_ws("orch-stale");
+        setup(&ws);
+        // One builder done, one left in_progress by an interrupted run.
+        std::fs::write(
+            ws.join(".agentloop/state/tasks/task-1/builders.json"),
+            r#"{"items":[
+                {"id":"task-1-b1","title":"t","desc":"d","deps":[],"status":"done","attempts":1,"acceptance":"a"},
+                {"id":"task-1-b2","title":"t","desc":"d","deps":[],"status":"in_progress","attempts":1,"acceptance":"a"}
+            ]}"#,
+        )
+        .unwrap();
+        let bk = ws.join(".agentloop/state/backlog.json");
+
+        repair_backlog(&bk, &ws, 3).unwrap();
+
+        let builders = task_state::read_builders(&ws, "task-1").unwrap();
+        assert_eq!(
+            task_state::item(&builders, "task-1-b2").unwrap()["status"],
+            "ready",
+            "stale builder is re-queued, not redesigned away"
+        );
+        assert!(
+            task_state::builders_path(&ws, "task-1").exists(),
+            "plan with done work is kept"
+        );
+        assert_eq!(
+            task_state::read_redesign(&ws, "task-1").0,
+            0,
+            "no redesign is burned for a crash orphan"
+        );
+        let v = state::read(&bk).unwrap();
+        assert_eq!(state::item(&v, "task-1").unwrap()["status"], "in_progress");
         let _ = std::fs::remove_dir_all(&ws);
     }
 }
