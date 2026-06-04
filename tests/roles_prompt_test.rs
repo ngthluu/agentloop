@@ -129,3 +129,44 @@ fn customer_prompt_is_ac_only() {
     assert!(p.contains(".agentloop/results/task-1-customer.json"));
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn manager_prompt_hardens_backlog_ownership() {
+    let ws = std::env::temp_dir().join(format!(
+        "mgr-rules-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
+    let p = manager::manager_prompt(&ws, 3);
+    assert!(p.contains("NEVER write \"in_progress\""));
+    assert!(p.contains("must be the id of another item in this backlog.json"));
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn manager_prompt_reports_items_stuck_on_failed_deps() {
+    let ws = std::env::temp_dir().join(format!(
+        "mgr-stuck-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let st = ws.join(".agentloop/state");
+    std::fs::create_dir_all(&st).unwrap();
+    std::fs::write(
+        st.join("backlog.json"),
+        r#"{"items":[
+            {"id":"task-1","title":"a","desc":"d","deps":[],"status":"failed","attempts":3,"acceptance":"x"},
+            {"id":"task-2","title":"b","desc":"d","deps":["task-1"],"status":"ready","attempts":0,"acceptance":"x"}
+        ]}"#,
+    )
+    .unwrap();
+    let p = manager::manager_prompt(&ws, 3);
+    assert!(p.contains("STUCK ITEMS"));
+    assert!(p.contains("task-2 depends on failed task-1"));
+    let _ = std::fs::remove_dir_all(&ws);
+}
