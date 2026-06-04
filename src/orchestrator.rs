@@ -78,6 +78,7 @@ fn auto_answer_pending(ws: &Path) {
 /// Spawn an unbounded resolver agent in the main workspace to resolve an in-progress
 /// merge conflict for `id`, then complete the merge. Returns true if the merge is
 /// resolved and committed.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_conflict(
     cfg: &Config,
     ws: &Path,

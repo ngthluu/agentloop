@@ -146,6 +146,7 @@ impl RecordingReporter {
 
 impl Reporter for RecordingReporter {
     fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str, log: Option<&Path>) {
+        // status="running" marks the start of a job's life in the event log.
         crate::history::record(&self.ws, "dispatch", id, "running", label);
         self.inner.dispatch(id, label, tool, model, log);
     }
@@ -164,6 +165,7 @@ impl Reporter for RecordingReporter {
         self.inner.iteration(n, merged, gate, open);
     }
     fn standby(&self) {
+        // Not recorded: standby is a UI session state, not a job lifecycle event.
         self.inner.standby();
     }
 }
