@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -24,9 +25,28 @@ pub fn active_agent_count() -> usize {
     ACTIVE_PGIDS.lock().unwrap().len()
 }
 
+/// Set when the process is quitting (signal handler / TUI exit). Usage-limit waits
+/// poll this so a quit interrupts an hours-long sleep instead of hanging shutdown.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// True once a shutdown (quit / signal) has been requested.
+pub fn shutdown_requested() -> bool {
+    SHUTDOWN.load(Ordering::SeqCst)
+}
+
+/// Clear the shutdown flag. Used in tests that call kill_all_agents() and then need
+/// to run further agent operations in the same process. Not intended for production use.
+pub fn reset_shutdown_for_tests() {
+    SHUTDOWN.store(false, Ordering::SeqCst);
+}
+
+/// Cap on how many usage-limit waits a single agent run will sit through.
+const MAX_LIMIT_WAITS: u32 = 48;
+
 /// Kill every in-flight agent process group (SIGTERM, brief grace, SIGKILL). Safe to
 /// call from a signal handler or on TUI exit; idempotent and never panics.
 pub fn kill_all_agents() {
+    SHUTDOWN.store(true, Ordering::SeqCst);
     use nix::sys::signal::{killpg, Signal};
     use nix::unistd::Pid;
     let pgids: Vec<i32> = ACTIVE_PGIDS.lock().unwrap().iter().copied().collect();
@@ -199,8 +219,13 @@ pub async fn run_with_timeout(
     use nix::sys::signal::{killpg, Signal};
     use nix::unistd::Pid;
 
-    let file =
-        std::fs::File::create(log).with_context(|| format!("create log {}", log.display()))?;
+    // Append so usage-limit retries and re-prompts that reuse one log path keep
+    // the earlier attempt's output (the TUI tails this file live).
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .with_context(|| format!("create log {}", log.display()))?;
 
     let mut cmd = tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(cwd);
@@ -290,7 +315,37 @@ pub async fn run_with_timeout(
     Ok(outcome)
 }
 
+/// Append one line to the job log (best-effort; the log is the TUI's live view).
+fn append_log_line(log: &Path, line: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Sleep in short slices so a quit (kill_all_agents) interrupts the wait.
+/// Returns false when shutdown was requested before the wait completed.
+async fn sleep_interruptible(total: Duration) -> bool {
+    let mut left = total;
+    while !left.is_zero() {
+        if shutdown_requested() {
+            return false;
+        }
+        let step = left.min(Duration::from_secs(5));
+        tokio::time::sleep(step).await;
+        left = left.saturating_sub(step);
+    }
+    !shutdown_requested()
+}
+
 /// Resolve a role and run the matching CLI (or fake) in cwd, capped by timeout.
+/// When the agent dies on a provider usage/rate limit, wait until the limit resets
+/// (parsed from the output when present, a fallback window otherwise) and re-run
+/// automatically. The wait is interruptible by shutdown and capped per run.
 pub async fn agent_run(
     cfg: &Config,
     role: &str,
@@ -308,5 +363,32 @@ pub async fn agent_run(
             std::env::var("FAKE_AGENT_BIN").context("FAKE_AGENT=1 but FAKE_AGENT_BIN unset")?;
         argv.insert(0, bin);
     }
-    run_with_timeout(&argv, cwd, log, t, stream_claude).await
+
+    let mut waits = 0u32;
+    loop {
+        let code = run_with_timeout(&argv, cwd, log, t, stream_claude).await?;
+        if code == 0 {
+            return Ok(code);
+        }
+        let tail = crate::limits::log_tail(log, 16 * 1024);
+        let Some(limit) = crate::limits::detect_usage_limit(&tail) else {
+            return Ok(code);
+        };
+        waits += 1;
+        if waits > MAX_LIMIT_WAITS || shutdown_requested() {
+            return Ok(code);
+        }
+        let wait = crate::limits::wait_duration(&limit, chrono::Local::now().timestamp());
+        let until = (chrono::Local::now() + chrono::Duration::seconds(wait.as_secs() as i64))
+            .format("%H:%M:%S");
+        let note = format!(
+            "⏳ usage limit reached — waiting {}s (until ~{until}), then auto-continuing (wait {waits}/{MAX_LIMIT_WAITS})",
+            wait.as_secs()
+        );
+        eprintln!("{note}");
+        append_log_line(log, &note);
+        if !sleep_interruptible(wait).await {
+            return Ok(code); // shutting down: do not respawn agents
+        }
+    }
 }
