@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod customer;
 pub mod events;
+pub mod history;
 pub mod inbox;
 pub mod limits;
 pub mod manager;
