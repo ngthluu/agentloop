@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::events::EventLineReporter;
+use crate::events::{EventLineReporter, RecordingReporter, Reporter};
 use crate::orchestrator;
 
 const TEMPLATE_MASTER: &str = include_str!("../templates/master.md");
@@ -208,7 +208,11 @@ pub async fn run() -> Result<()> {
         let rc = crate::app::run_tui(cfg, ws.clone(), goal_text).await?;
         std::process::exit(rc);
     } else {
-        let rc = orchestrator::run(&cfg, &ws, Arc::new(EventLineReporter)).await?;
+        let reporter: Arc<dyn Reporter> = Arc::new(RecordingReporter::new(
+            ws.clone(),
+            Arc::new(EventLineReporter),
+        ));
+        let rc = orchestrator::run(&cfg, &ws, reporter).await?;
         eprintln!(
             "=== agentloop finished (rc={rc}) in {}. See {}/.agentloop/state/master.md ===",
             crate::tui::fmt_elapsed(started.elapsed()),

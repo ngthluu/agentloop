@@ -80,3 +80,24 @@ fn archive_file_missing_source_is_noop() {
     history::archive_file(&ws.join("absent.json"), &ws.join("archive")).unwrap();
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn recording_reporter_persists_dispatch_and_status() {
+    use agentloop::events::{EventLineReporter, RecordingReporter, Reporter};
+    use std::sync::Arc;
+
+    let ws = tmp_ws("hist-reporter");
+    let rep = RecordingReporter::new(ws.clone(), Arc::new(EventLineReporter));
+    rep.dispatch("task-1-b1", "make file", "codex", "gpt-5", None);
+    rep.status("task-1-b1", "bounced", "", "", "needs_input: auto-answered");
+
+    let evs = history::read_events(&ws);
+    assert_eq!(evs.len(), 2);
+    assert_eq!(evs[0]["kind"], "dispatch");
+    assert_eq!(evs[0]["status"], "running");
+    assert_eq!(evs[1]["kind"], "status");
+    assert_eq!(evs[1]["status"], "bounced");
+    assert_eq!(evs[1]["reason"], "needs_input: auto-answered");
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

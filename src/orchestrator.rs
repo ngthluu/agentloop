@@ -110,20 +110,26 @@ async fn resolve_conflict(
     // Resolved iff no unmerged paths remain. If the agent resolved+staged but didn't
     // commit, finish the merge ourselves.
     if worktree::has_unmerged(ws) {
-        reporter.status(&rid, "failed", &tool, &model);
+        reporter.status(&rid, "failed", &tool, &model, "resolver left unmerged paths");
         return Ok(false);
     }
     if worktree::merge_in_progress(ws) && !worktree::commit_merge(ws) {
-        reporter.status(&rid, "failed", &tool, &model);
+        reporter.status(&rid, "failed", &tool, &model, "resolver could not commit the merge");
         return Ok(false);
     }
     // Guard against a resolver that aborted instead of completing the merge: the
     // branch's commits must now be contained in HEAD.
     if worktree::has_commits_ahead(ws, branch) {
-        reporter.status(&rid, "failed", &tool, &model);
+        reporter.status(
+            &rid,
+            "failed",
+            &tool,
+            &model,
+            "resolver did not complete the merge (branch commits not in HEAD)",
+        );
         return Ok(false);
     }
-    reporter.status(&rid, "merged", &tool, &model);
+    reporter.status(&rid, "merged", &tool, &model, "");
     Ok(true)
 }
 
@@ -240,15 +246,13 @@ fn reopen_parent_for_redesign(
     if count >= max_redesigns {
         // The task keeps failing after its builders complete. Stop the redesign loop:
         // mark it failed (so it leaves the open set) and keep the plan for inspection.
-        state::set_status(
-            bk,
-            task_id,
-            "failed",
-            &format!("redesign cap ({max_redesigns}) reached; last failure: {note}"),
-        )?;
+        let reason = format!("redesign cap ({max_redesigns}) reached; last failure: {note}");
+        state::set_status(bk, task_id, "failed", &reason)?;
+        crate::history::record(ws, "task", task_id, "failed", &reason);
     } else {
         // Under the cap: reopen for a fresh, feedback-informed architect pass.
         state::set_status(bk, task_id, "ready", note)?;
+        crate::history::record(ws, "task", task_id, "redesign", note);
         invalidate_task_plan(ws, task_id);
     }
     Ok(())
@@ -373,7 +377,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         eprintln!("manager failed/invalid");
         anyhow::bail!("manager invalid");
     }
-    reporter.status("manager", "done", &mtool, &mmodel);
+    reporter.status("manager", "done", &mtool, &mmodel, "");
     let _ = reopen_unapproved_done_tasks(&bk, ws)?;
     repair_backlog(&bk, ws, maxatt)?;
 
@@ -397,10 +401,10 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         let ok = architect::architect_run(cfg, ws, &task, &log, itimeout).await?;
         if ok && task_state::builder_plan_valid(ws, id) {
             state::set_status(&bk, id, "in_progress", "")?;
-            reporter.status(&aid, "done", &atool, &amodel);
+            reporter.status(&aid, "done", &atool, &amodel, "");
         } else {
             state::set_status(&bk, id, "ready", "architect produced invalid task plan")?;
-            reporter.status(&aid, "failed", &atool, &amodel);
+            reporter.status(&aid, "failed", &atool, &amodel, "architect produced invalid task plan");
         }
     }
 
@@ -432,6 +436,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "failed",
                     &format!("exceeded max_attempts ({maxatt})"),
                 )?;
+                reporter.status(&id, "failed", "", "", &format!("exceeded max_attempts ({maxatt})"));
                 if dispatched
                     .iter()
                     .any(|(dispatched_task_id, _)| dispatched_task_id == task_id)
@@ -458,6 +463,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "failed",
                     "worktree create failed",
                 )?;
+                reporter.status(&id, "failed", "", "", "worktree create failed before dispatch");
                 if dispatched
                     .iter()
                     .any(|(dispatched_task_id, _)| dispatched_task_id == task_id)
@@ -521,10 +527,13 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             // "you decide" answer and re-dispatch with the prior Q&A appended to
             // the builder prompt. Re-dispatch consumes an attempt, so a builder
             // that asks forever still hits max_attempts -> redesign.
-            if crate::inbox::has_question(ws, id) {
+            let note = if crate::inbox::has_question(ws, id) {
                 if let Err(e) = auto_answer(ws, id) {
                     eprintln!("auto-answer failed for {id}: {e:#}");
                     task_state::set_builder_status(ws, task_id, id, "ready", "auto-answer failed")?;
+                    "needs_input: auto-answer failed; re-dispatching"
+                } else {
+                    "needs_input: auto-answered; re-dispatching"
                 }
             } else {
                 // Malformed/missing question file: treat as a normal non-done bounce.
@@ -535,8 +544,9 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "ready",
                     "needs_input without a question file",
                 )?;
-            }
-            reporter.status(id, "bounced", "", "");
+                "needs_input without a question file"
+            };
+            reporter.status(id, "bounced", "", "", note);
             worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
             let _ = std::fs::remove_file(&rfile);
             continue;
@@ -552,12 +562,12 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "ready",
                     "builder reported done but made no commits",
                 )?;
-                reporter.status(id, "bounced", "", "");
+                reporter.status(id, "bounced", "", "", "reported done but made no commits");
             } else {
                 match worktree::merge_or_conflict(ws, &branch)? {
                     MergeOutcome::Merged => {
                         task_state::set_builder_status(ws, task_id, id, "done", "")?;
-                        reporter.status(id, "merged", "", "");
+                        reporter.status(id, "merged", "", "", "");
                         merged += 1;
                     }
                     MergeOutcome::Conflict => {
@@ -567,7 +577,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                             .await?
                         {
                             task_state::set_builder_status(ws, task_id, id, "done", "")?;
-                            reporter.status(id, "merged", "", "");
+                            reporter.status(id, "merged", "", "", "");
                             merged += 1;
                         } else {
                             // The resolver itself is unbounded (it never consumes an
@@ -583,7 +593,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                                 "ready",
                                 "merge conflict; resolver failed",
                             )?;
-                            reporter.status(id, "bounced", "", "");
+                            reporter.status(id, "bounced", "", "", "merge conflict; resolver failed");
                         }
                     }
                 }
@@ -596,7 +606,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                 "ready",
                 "builder did not report done",
             )?;
-            reporter.status(id, "failed", "", "");
+            reporter.status(id, "failed", "", "", "did not report done (missing/invalid result file or status != done)");
         }
         worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
         let _ = std::fs::remove_file(&rfile);
@@ -630,11 +640,11 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         if customer::customer_run(cfg, ws, &task, &log, itimeout).await? {
             state::set_status(&bk, &task_id, "done", "")?;
             task_state::reset_redesign(ws, &task_id);
-            reporter.status(&cid, "approved", &ctool, &cmodel);
+            reporter.status(&cid, "approved", &ctool, &cmodel, "");
         } else {
             let feedback = customer_feedback(ws, &task_id);
             reopen_parent_for_redesign(&bk, ws, &task_id, &feedback, maxatt)?;
-            reporter.status(&cid, "rejected", &ctool, &cmodel);
+            reporter.status(&cid, "rejected", &ctool, &cmodel, &feedback);
         }
     }
 

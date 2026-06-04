@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::events::{ChannelReporter, Command, Event, Reporter};
+use crate::events::{ChannelReporter, Command, Event, RecordingReporter, Reporter};
 use crate::orchestrator;
 use crate::tui::{self, AppState};
 
@@ -112,7 +112,10 @@ pub async fn run_tui(cfg: Config, ws: PathBuf, goal: String) -> Result<i32> {
     let (etx, mut erx) = mpsc::unbounded_channel::<Event>();
     let (ctx, mut crx) = mpsc::unbounded_channel::<Command>();
 
-    let reporter: Arc<dyn Reporter> = Arc::new(ChannelReporter::new(etx));
+    let reporter: Arc<dyn Reporter> = Arc::new(RecordingReporter::new(
+        ws.clone(),
+        Arc::new(ChannelReporter::new(etx)),
+    ));
     let cfg_o = cfg.clone();
     let ws_o = ws.clone();
     let orch = tokio::spawn(async move {
