@@ -90,19 +90,6 @@ fn ready_dispatches_dep_blocked_but_not_user_blocked() {
 }
 
 #[test]
-fn user_blocked_counts_only_question_blocks() {
-    let ws = tmp_ws(BK_BLOCKED);
-    write_question(&ws, "b-user");
-    let bk = bk_path(&ws);
-    assert_eq!(state::blocked_count(&bk).unwrap(), 3, "raw blocked count");
-    assert_eq!(
-        state::user_blocked_count(&bk, &ws).unwrap(),
-        1,
-        "only b-user waits on the user"
-    );
-}
-
-#[test]
 fn open_count_counts_open_states() {
     let p = tmp_backlog(BK);
     assert_eq!(state::open_count(&p).unwrap(), 4);

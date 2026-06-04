@@ -19,15 +19,7 @@ fn applies_events_to_view_model() {
         model: "gpt-5".into(),
         log_path: None,
     });
-    s.apply(Event::QuestionRaised {
-        item_id: "db".into(),
-        label: "db-schema".into(),
-        text: "SQLite or Postgres?".into(),
-        context: "storage".into(),
-    });
     assert_eq!(s.jobs.len(), 1);
-    assert_eq!(s.inbox.len(), 1);
-    assert_eq!(s.inbox[0].item_id, "db");
 
     s.apply(Event::JobStatus {
         id: "it-1".into(),
@@ -110,30 +102,6 @@ fn shift_enter_inserts_newline_in_goal_entry() {
 }
 
 #[test]
-fn typing_then_enter_answers_selected_question() {
-    let mut s = start("g");
-    s.apply(Event::QuestionRaised {
-        item_id: "db".into(),
-        label: "db".into(),
-        text: "q?".into(),
-        context: "".into(),
-    });
-    // Focus defaults to Inbox with the question selected: typing goes straight to input.
-    for c in "yes".chars() {
-        s.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-    }
-    let cmd = s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(
-        matches!(cmd, Some(Command::AnswerQuestion { ref item_id, ref text }) if item_id == "db" && text == "yes")
-    );
-    // Input is cleared after submit, so 'q' now quits.
-    assert!(matches!(
-        s.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
-        Some(Command::Quit)
-    ));
-}
-
-#[test]
 fn customer_review_statuses_freeze_timer() {
     for status in ["approved", "rejected"] {
         let mut s = AppState::new("g".into());
@@ -155,7 +123,7 @@ fn customer_review_statuses_freeze_timer() {
 }
 
 #[test]
-fn typing_then_enter_adds_task_when_no_question() {
+fn typing_then_enter_adds_task() {
     let mut s = start("g");
     // No questions: target is Add task.
     for c in "due flag".chars() {
@@ -183,7 +151,7 @@ fn q_quits_only_when_input_empty() {
 }
 
 #[test]
-fn tab_switches_focus_and_empty_enter_opens_job_detail() {
+fn empty_enter_opens_job_detail_and_esc_returns() {
     use std::path::PathBuf;
     let mut s = start("g");
     s.apply(Event::JobDispatched {
@@ -193,13 +161,7 @@ fn tab_switches_focus_and_empty_enter_opens_job_detail() {
         model: "gpt-5".into(),
         log_path: Some(PathBuf::from("/tmp/x.log")),
     });
-    // Default focus is Inbox; Tab moves it to Jobs.
-    assert!(!s.focus_is_jobs());
-    assert!(s
-        .on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-        .is_none());
-    assert!(s.focus_is_jobs());
-    // Empty input + Enter on Jobs opens the detail view.
+    // Empty input + Enter opens the detail view for the selected job.
     assert!(s
         .on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         .is_none());
@@ -222,7 +184,6 @@ fn q_quits_from_job_detail_when_input_empty() {
         model: "gpt-5".into(),
         log_path: Some(PathBuf::from("/tmp/x.log")),
     });
-    s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // focus Jobs
     s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // open detail (empty input)
     assert!(s.in_job_detail());
     // q with empty input quits from detail.
@@ -236,20 +197,4 @@ fn q_quits_from_job_detail_when_input_empty() {
         .on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
         .is_none());
     assert_eq!(s.input_buffer(), "xq");
-}
-
-#[test]
-fn target_label_tracks_focus_and_inbox() {
-    let mut s = start("g");
-    assert_eq!(s.input_target_label(), "Add task");
-    s.apply(Event::QuestionRaised {
-        item_id: "db".into(),
-        label: "db".into(),
-        text: "q?".into(),
-        context: "".into(),
-    });
-    // Inbox focused (default) with a question -> answering.
-    assert_eq!(s.input_target_label(), "Answering db");
-    s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // focus Jobs
-    assert_eq!(s.input_target_label(), "Add task");
 }

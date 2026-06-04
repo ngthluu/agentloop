@@ -113,34 +113,3 @@ pub fn increment_attempts(path: &Path, id: &str) -> Result<()> {
 pub fn item<'a>(v: &'a Value, id: &str) -> Option<&'a Value> {
     v["items"].as_array()?.iter().find(|i| i["id"] == json!(id))
 }
-
-pub fn blocked_count(path: &Path) -> Result<i64> {
-    let v = read(path)?;
-    let empty = vec![];
-    Ok(v["items"]
-        .as_array()
-        .unwrap_or(&empty)
-        .iter()
-        .filter(|i| i["status"] == "blocked")
-        .count() as i64)
-}
-
-/// Items genuinely waiting on the user: `blocked` AND carrying a pending question
-/// file. Manager dependency-`blocked` items (no question) are excluded — they are
-/// dispatched by [`ready_items`], so they must not be mistaken for a user halt.
-pub fn user_blocked_count(path: &Path, ws: &Path) -> Result<i64> {
-    let v = read(path)?;
-    let empty = vec![];
-    Ok(v["items"]
-        .as_array()
-        .unwrap_or(&empty)
-        .iter()
-        .filter(|i| i["status"] == "blocked")
-        .filter(|i| {
-            i["id"]
-                .as_str()
-                .map(|id| crate::inbox::has_question(ws, id))
-                .unwrap_or(false)
-        })
-        .count() as i64)
-}

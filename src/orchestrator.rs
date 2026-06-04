@@ -19,9 +19,43 @@ const NO_TIMEOUT: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
 /// "user" always delegates the decision back to the agent.
 pub const AUTO_ANSWER: &str = "Decide the best option for me — you decide. Pick whatever best serves the goal and the acceptance criteria, record your decision in the result summary, and continue.";
 
-/// Auto-answer a raised question with [`AUTO_ANSWER`] and re-queue the asking item.
+/// Auto-answer a raised question with [`AUTO_ANSWER`]: persist the Q&A, consume the
+/// question file, and flip the asking item ready so it is re-dispatched with the
+/// prior Q&A appended to its prompt.
 pub fn auto_answer(ws: &Path, item_id: &str) -> Result<()> {
-    apply_answer(ws, item_id, AUTO_ANSWER)
+    let bk = ws.join(".agentloop/state/backlog.json");
+    if let Some(task_id) = builder_owner(ws, item_id)? {
+        let question = match crate::inbox::read_question(ws, item_id) {
+            Ok(q) => q.question,
+            Err(_) => builder_item(ws, &task_id, item_id)?
+                .and_then(|i| i["notes"].as_str().map(String::from))
+                .unwrap_or_default(),
+        };
+        crate::inbox::record_answer(ws, item_id, &question, AUTO_ANSWER)?;
+        let _ = crate::inbox::consume_question(ws, item_id);
+        task_state::set_builder_status(
+            ws,
+            &task_id,
+            item_id,
+            "ready",
+            "auto-answered; re-dispatching",
+        )?;
+        return Ok(());
+    }
+
+    let question = match crate::inbox::read_question(ws, item_id) {
+        Ok(q) => q.question,
+        Err(_) => {
+            let v = state::read(&bk)?;
+            state::item(&v, item_id)
+                .and_then(|i| i["notes"].as_str().map(String::from))
+                .unwrap_or_default()
+        }
+    };
+    crate::inbox::record_answer(ws, item_id, &question, AUTO_ANSWER)?;
+    let _ = crate::inbox::consume_question(ws, item_id);
+    state::set_status(&bk, item_id, "ready", "auto-answered; re-dispatching")?;
+    Ok(())
 }
 
 /// Auto-answer every outstanding question file (e.g. left by an interrupted older
@@ -230,45 +264,6 @@ fn gate_failure_feedback(ws: &Path) -> String {
     } else {
         format!("verify.sh failed; redesign required:\n{output}")
     }
-}
-
-fn task_blocked_on_builder_question(ws: &Path, task_id: &str) -> Result<bool> {
-    let builders = match task_state::read_builders(ws, task_id) {
-        Ok(builders) => builders,
-        Err(_) => return Ok(false),
-    };
-    let empty = vec![];
-    let has_question = builders["items"]
-        .as_array()
-        .unwrap_or(&empty)
-        .iter()
-        .filter(|item| item["status"] == "blocked")
-        .filter_map(|item| item["id"].as_str())
-        .any(|id| crate::inbox::has_question(ws, id));
-    Ok(has_question && task_state::ready_builders(ws, task_id, 1)?.is_empty())
-}
-
-fn user_blocked_business_count(bk: &Path, ws: &Path) -> Result<i64> {
-    let backlog = state::read(bk)?;
-    let empty = vec![];
-    let mut count = 0i64;
-    for item in backlog["items"].as_array().unwrap_or(&empty) {
-        if !matches!(
-            item["status"].as_str(),
-            Some("ready") | Some("in_progress") | Some("blocked")
-        ) {
-            continue;
-        }
-        let Some(id) = item["id"].as_str() else {
-            continue;
-        };
-        if item["status"] == "blocked" && crate::inbox::has_question(ws, id) {
-            count += 1;
-        } else if task_blocked_on_builder_question(ws, id)? {
-            count += 1;
-        }
-    }
-    Ok(count)
 }
 
 fn reopen_unapproved_done_tasks(bk: &Path, ws: &Path) -> Result<u32> {
@@ -590,40 +585,6 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     Ok(merged)
 }
 
-/// Apply a user's answer to a blocked item: persist it, consume the question,
-/// flip the item blocked->ready so it is re-dispatched with the prior Q&A.
-pub fn apply_answer(ws: &Path, item_id: &str, text: &str) -> Result<()> {
-    let bk = ws.join(".agentloop/state/backlog.json");
-    if let Some(task_id) = builder_owner(ws, item_id)? {
-        let question = match crate::inbox::read_question(ws, item_id) {
-            Ok(q) => q.question,
-            Err(_) => builder_item(ws, &task_id, item_id)?
-                .and_then(|i| i["notes"].as_str().map(String::from))
-                .unwrap_or_default(),
-        };
-        crate::inbox::record_answer(ws, item_id, &question, text)?;
-        let _ = crate::inbox::consume_question(ws, item_id);
-        task_state::set_builder_status(ws, &task_id, item_id, "ready", "answered; re-dispatching")?;
-        return Ok(());
-    }
-
-    // The question text: prefer the live question file; fall back to the item's notes
-    // (where the needs_input handler stashed it) if the file was already consumed.
-    let question = match crate::inbox::read_question(ws, item_id) {
-        Ok(q) => q.question,
-        Err(_) => {
-            let v = state::read(&bk)?;
-            state::item(&v, item_id)
-                .and_then(|i| i["notes"].as_str().map(String::from))
-                .unwrap_or_default()
-        }
-    };
-    crate::inbox::record_answer(ws, item_id, &question, text)?;
-    let _ = crate::inbox::consume_question(ws, item_id);
-    state::set_status(&bk, item_id, "ready", "answered; re-dispatching")?;
-    Ok(())
-}
-
 /// Drive iterations until DONE (0), cap/stall (1), or hard error (Err).
 pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result<i32> {
     let sdir = ws.join(".agentloop/state");
@@ -654,14 +615,6 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
             return Ok(0);
         }
 
-        // Only a genuine user-question block (not a manager dependency-block, which
-        // ready_items now dispatches autonomously) should halt a headless run.
-        let user_blocked = user_blocked_business_count(&bk, ws)?;
-        if open > 0 && open == user_blocked {
-            eprintln!("STOP: blocked on user input (headless)");
-            return Ok(1);
-        }
-
         if merged == 0 && gate_state == prev_gate {
             stalls += 1;
             if stalls >= 2 {
@@ -678,8 +631,8 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
 }
 
 /// Interactive driver with a standby state machine. DONE/cap/stall transitions to
-/// standby (idle, awaiting a command) instead of exiting. AddTask / AnswerQuestion
-/// re-engage with a fresh budget window; Quit exits. Tasks can also be added mid-run.
+/// standby (idle, awaiting a command) instead of exiting. AddTask re-engages with a
+/// fresh budget window; Quit exits. Tasks can also be added mid-run.
 pub async fn run_interactive(
     cfg: &Config,
     ws: &Path,
@@ -707,8 +660,8 @@ pub async fn run_interactive(
                 }
                 break;
             }
-            // Stray answer/add-task before the run starts: ignore.
-            Some(Command::AnswerQuestion { .. }) | Some(Command::AddTask { .. }) => {}
+            // Stray add-task before the run starts: ignore.
+            Some(Command::AddTask { .. }) => {}
         }
     }
 
@@ -719,9 +672,6 @@ pub async fn run_interactive(
             while let Ok(cmd) = crx.try_recv() {
                 match cmd {
                     Command::Quit => return Ok(0),
-                    Command::AnswerQuestion { item_id, text } => {
-                        let _ = apply_answer(ws, &item_id, &text);
-                    }
                     Command::AddTask { request } => {
                         let _ = crate::requests::append(ws, &request);
                     }
@@ -745,29 +695,10 @@ pub async fn run_interactive(
             let grc = gate(ws);
             let gate_state = if grc == 0 { "pass" } else { "fail" };
             let open = state::open_count(&bk)?;
-            let user_blocked = user_blocked_business_count(&bk, ws)?;
             reporter.iteration(n, merged, gate_state, open);
 
             if gate_state == "pass" && open == 0 {
                 break 'working true;
-            }
-
-            // Only user-question blocks remain (dependency-blocks are dispatched by
-            // ready_items): block for a command (answer/add-task/quit).
-            if open > 0 && open == user_blocked {
-                match crx.recv().await {
-                    None | Some(Command::Quit) => return Ok(0),
-                    Some(Command::AnswerQuestion { item_id, text }) => {
-                        let _ = apply_answer(ws, &item_id, &text);
-                    }
-                    Some(Command::AddTask { request }) => {
-                        let _ = crate::requests::append(ws, &request);
-                    }
-                    Some(Command::StartRun { .. }) => {}
-                }
-                stalls = 0;
-                prev_gate = gate_state.to_string();
-                continue 'working;
             }
 
             if merged == 0 && gate_state == prev_gate {
@@ -787,9 +718,6 @@ pub async fn run_interactive(
             reporter.standby();
             match crx.recv().await {
                 None | Some(Command::Quit) => return Ok(0),
-                Some(Command::AnswerQuestion { item_id, text }) => {
-                    let _ = apply_answer(ws, &item_id, &text);
-                }
                 Some(Command::AddTask { request }) => {
                     let _ = crate::requests::append(ws, &request);
                 }

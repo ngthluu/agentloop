@@ -27,7 +27,7 @@ fn started(goal: &str) -> AppState {
 }
 
 #[test]
-fn jobs_render_above_inbox_full_width() {
+fn jobs_pane_renders_without_inbox() {
     let mut s = started("goal");
     s.apply(Event::JobDispatched {
         id: "it-1".into(),
@@ -36,23 +36,13 @@ fn jobs_render_above_inbox_full_width() {
         model: "gpt-5".into(),
         log_path: None,
     });
-    s.apply(Event::QuestionRaised {
-        item_id: "db".into(),
-        label: "db".into(),
-        text: "q?".into(),
-        context: "".into(),
-    });
 
     let backend = TestBackend::new(80, 24);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|f| tui::render(f, &s)).unwrap();
 
-    let jobs = find(&term, "Jobs").expect("Jobs pane rendered");
-    let inbox = find(&term, "Inbox").expect("Inbox pane rendered");
-    assert!(
-        jobs.0 < inbox.0,
-        "Jobs ({jobs:?}) is above Inbox ({inbox:?})"
-    );
+    assert!(find(&term, "Jobs").is_some(), "Jobs pane rendered");
+    assert!(find(&term, "Inbox").is_none(), "Inbox pane removed");
 }
 
 #[test]
@@ -96,8 +86,7 @@ fn jobs_pane_scrolls_to_keep_selection_visible() {
             log_path: None,
         });
     }
-    // Focus Jobs, then move the selection to the last job.
-    s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    // Move the selection to the last job.
     for _ in 0..39 {
         s.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
@@ -125,35 +114,6 @@ fn list_view_shows_input_target_label() {
     assert!(
         find(&term, "Add task").is_some(),
         "bottom input shows the Add task target"
-    );
-}
-
-#[test]
-fn inbox_pane_scrolls_to_keep_selection_visible() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    let mut s = started("goal");
-    for i in 0..40 {
-        s.apply(Event::QuestionRaised {
-            item_id: format!("q-{i}"),
-            label: format!("inbLABEL{i}"),
-            text: "pick one".into(),
-            context: "".into(),
-        });
-    }
-    // Focus defaults to Inbox; move the selection to the last question.
-    for _ in 0..39 {
-        s.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    }
-    let backend = TestBackend::new(80, 20);
-    let mut term = Terminal::new(backend).unwrap();
-    term.draw(|f| tui::render(f, &s)).unwrap();
-    assert!(
-        find(&term, "inbLABEL39").is_some(),
-        "selected (last) question scrolled into view"
-    );
-    assert!(
-        find(&term, "inbLABEL0 ").is_none(),
-        "first question scrolled out of view"
     );
 }
 
