@@ -18,6 +18,8 @@ pub struct UsageLimit {
 ///   API:    "rate_limit_error"
 pub fn detect_usage_limit(text: &str) -> Option<UsageLimit> {
     let lower = text.to_lowercase();
+    // Known tradeoff: "rate limit reached" can also appear in app-level logs
+    // (e.g. "database rate limit reached"); accepted — the cost is one wait.
     const PATTERNS: [&str; 5] = [
         "usage limit reached",
         "reached your usage limit",
@@ -48,7 +50,10 @@ pub fn wait_duration(limit: &UsageLimit, now_epoch: i64) -> Duration {
     let slack = env_secs("AGENTLOOP_LIMIT_SLACK_SECS", 60);
     let fallback = env_secs("AGENTLOOP_LIMIT_FALLBACK_SECS", 900);
     let secs = match limit.reset_epoch {
-        Some(reset) => (reset - now_epoch).max(0) as u64 + slack,
+        Some(reset) => {
+            let remaining = (reset - now_epoch).max(0) as u64;
+            remaining.saturating_add(slack)
+        }
         None => fallback,
     };
     Duration::from_secs(secs.min(6 * 3600))
@@ -154,6 +159,11 @@ mod tests {
         assert_eq!(log_tail(&p, 16), "");
         std::fs::write(&p, "0123456789ABCDEF-tail").unwrap();
         assert_eq!(log_tail(&p, 5), "-tail");
+        assert_eq!(
+            log_tail(&p, 1000),
+            "0123456789ABCDEF-tail",
+            "window larger than the file reads the whole file"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
