@@ -7,10 +7,11 @@ customer approves each business task against its acceptance criteria before the 
 calls it done.
 
 When run in a terminal it shows a live TUI: a goal-entry screen lets you confirm or
-edit the goal before anything runs, then a progress panel, an inbox for answering
-questions that agents raise, and a persistent input bar for adding tasks. When the
-goal is done it stays alive in standby so you can keep adding tasks. Piped/non-TTY
-runs fall back to plain event-line output and exit on completion.
+edit the goal before anything runs, then a jobs panel and a persistent input bar for
+adding tasks. Questions agents raise are answered automatically ("you decide"), so
+the loop never waits on you. When the goal is done it stays alive in standby so you
+can keep adding tasks. Piped/non-TTY runs fall back to plain event-line output and
+exit on completion.
 
 ## Install
 
@@ -82,16 +83,24 @@ Options:
   conflict and complete the merge, instead of bouncing the item. The resolver is unbounded
   (no attempt cap, no timeout) but is killed when you quit, so it never orphans. If it
   cannot resolve, the merge is aborted and the item is returned for manager repair.
-- **Question inbox:** a builder that needs a decision only you can make writes
-  `.agentloop/questions/<id>.json` and reports `status:"needs_input"`. The item is parked
-  as `blocked` and surfaced in the TUI inbox. Your answer is stored in
-  `.agentloop/answers/<id>.json` and the item is re-dispatched with the prior Q&A appended
-  to its prompt.
+- **Autonomous decisions:** a builder that hits a decision writes
+  `.agentloop/questions/<id>.json` and reports `status:"needs_input"`. The loop answers
+  it immediately with a canned "decide the best option for me — you decide" reply
+  (stored in `.agentloop/answers/<id>.json`) and re-dispatches the item with the Q&A
+  appended to its prompt. Nothing waits on the user.
+- **Usage limits:** when claude/codex dies on a provider usage/rate limit, agentloop
+  parses the reset time when the output includes one (else waits a fallback window),
+  logs a ⏳ note to the job log, and re-runs the agent automatically. Quitting
+  interrupts the wait.
+- **Backlog repair:** after every manager round the orchestrator drops deps on ids
+  that don't exist in the backlog, re-architects `in_progress` tasks that lost their
+  plan, and redesigns plans whose remaining items can never dispatch — the loop never
+  idles while open work exists.
 - **Add tasks any time:** an add-task request is appended to `.agentloop/state/requests.jsonl`;
   the manager folds it into the business backlog on its next round (you feed intent;
   the manager stays the sole owner of the backlog).
 - **Standby:** on completion (or a cap/stall) the interactive run idles in standby instead
-  of exiting; adding a task or answering a question re-engages it with a fresh budget window.
+  of exiting; adding a task re-engages it with a fresh budget window.
 - **Re-run = more context:** re-running with new goal text (without `--fresh`) appends it
   to `goal.md` and queues it as a pending request, so the manager folds it into the
   business backlog as new tasks and the loop re-engages instead of reporting an instant
@@ -104,24 +113,18 @@ sits at the bottom of the screen at all times (similar to Claude Code's input). 
 
 - Printable keys always type into the persistent bottom input bar; it wraps long text
   automatically. `shift+enter` (or `alt+enter`) inserts a newline.
-- `enter` — submits the input. When the Inbox pane is focused and a question is
-  selected, the input text is used as the answer to that question; otherwise the text
-  is added as a new task for the manager. A label above the input shows the current
-  target: "Answering \<id\>" or "Add task". When the input is empty, `enter` on the
-  Jobs pane opens the selected job's detail view (live log tail + a real-time working
+- `enter` — submits the input as a new task for the manager. When the input is empty,
+  `enter` opens the selected job's detail view (live log tail + a real-time working
   timer).
-- `tab` — switch focus between the Jobs and Inbox panes (the focused pane is highlighted)
-- `↑`/`↓` — navigate the focused pane (jobs or the question inbox), or scroll the log
-  in the job-detail view
+- `↑`/`↓` — navigate the jobs list, or scroll the log in the job-detail view
 - `esc` — clear the input bar, or leave the job-detail view
 - `q` — quit (only when the input bar is empty); `Ctrl-C` always quits
 
-The status bar shows the goal, current iteration, gate state, open-item count, a
-pending-questions counter, and a live `⏱` total-run-time readout; `✓ DONE · standby`
-appears when the run is idle and waiting. (Headless runs print the total elapsed time on
-exit.)
+The status bar shows the goal, current iteration, gate state, open-item count, and a
+live `⏱` total-run-time readout; `✓ DONE · standby` appears when the run is idle and
+waiting. (Headless runs print the total elapsed time on exit.)
 
-The main panel stacks the Jobs pane on top and the Inbox pane below (full width each).
+The main panel is the Jobs list (full width).
 
 ## Layout
 
@@ -139,7 +142,8 @@ src/
   customer.rs      acceptance-criteria approval prompt + validation
   task_state.rs    task-local design/builders/customer state helpers
   events.rs        Reporter trait, Event/Command enums, stderr + channel reporters
-  inbox.rs         question/answer file IO + prior-Q&A prompt block
+  inbox.rs         question/answer file IO + prior-Q&A prompt block (auto-answered)
+  limits.rs        usage/rate-limit detection + auto-continue wait math
   requests.rs      pending user-request log (requests.jsonl) + manager prompt block
   orchestrator.rs  iteration loop, dispatch, integration, termination, standby machine
   tui.rs           ratatui view-model (events -> state, keys -> commands) + render
