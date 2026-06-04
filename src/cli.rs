@@ -35,13 +35,16 @@ struct Args {
     report: bool,
 }
 
+/// Run git, capturing (and discarding) its output — bootstrap probes like
+/// `git config user.email` and `git rev-parse HEAD` must not print onto the
+/// user's terminal. Returns whether the command succeeded.
 fn git(repo: &Path, args: &[&str]) -> bool {
     Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(args)
-        .status()
-        .map(|s| s.success())
+        .output()
+        .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
