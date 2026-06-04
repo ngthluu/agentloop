@@ -9,6 +9,7 @@ pub mod inbox;
 pub mod limits;
 pub mod manager;
 pub mod orchestrator;
+pub mod preflight;
 pub mod requests;
 pub mod spawn;
 pub mod state;

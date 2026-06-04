@@ -189,6 +189,8 @@ pub async fn run() -> Result<()> {
         cfg.caps.max_iterations = Some(m);
     }
 
+    crate::preflight::check(&cfg)?;
+
     use std::io::IsTerminal;
     let is_tty = std::io::stdout().is_terminal();
     // Headless and dry-run runs: a SIGINT (Ctrl-C) or SIGTERM kills in-flight agents and
