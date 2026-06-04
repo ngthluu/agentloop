@@ -291,6 +291,55 @@ fn reopen_unapproved_done_tasks(bk: &Path, ws: &Path) -> Result<u32> {
     Ok(ids.len() as u32)
 }
 
+/// Deterministic liveness repairs, run right after the manager each round: the
+/// backlog must never hold open work the orchestrator can never dispatch, or the
+/// loop stalls/standbys with open items and nothing to do.
+fn repair_backlog(bk: &Path, ws: &Path, max_redesigns: u32) -> Result<()> {
+    // 1) Deps on ids missing from the backlog can never be satisfied (e.g. a
+    //    manager that leaked task-local sub-item ids) — drop them.
+    for (id, dep) in state::strip_unknown_deps(bk)? {
+        eprintln!("repair: dropped {id} dep on unknown id {dep}");
+    }
+
+    // 2) Only `ready` items reach the architect, so `in_progress` without a valid
+    //    local plan would never get planned again (manager rewrite / stale resume)
+    //    — flip it back to ready.
+    let backlog = state::read(bk)?;
+    let empty = vec![];
+    for item in backlog["items"].as_array().unwrap_or(&empty) {
+        let Some(id) = item["id"].as_str() else {
+            continue;
+        };
+        if item["status"] == "in_progress" && !task_state::builder_plan_valid(ws, id) {
+            state::set_status(
+                bk,
+                id,
+                "ready",
+                "in_progress without a valid plan; re-architecting",
+            )?;
+        }
+    }
+
+    // 3) A valid plan whose remaining builders can never dispatch (deps on failed
+    //    or abandoned builders) deadlocks its parent — reopen it for redesign.
+    for task_id in active_business_ids(bk, ws)? {
+        if !task_state::builder_plan_valid(ws, &task_id)
+            || task_state::all_builders_done(ws, &task_id)?
+            || !task_state::ready_builders(ws, &task_id, 1)?.is_empty()
+        {
+            continue;
+        }
+        reopen_parent_for_redesign(
+            bk,
+            ws,
+            &task_id,
+            "builder plan deadlocked: no dispatchable builders remain",
+            max_redesigns,
+        )?;
+    }
+    Ok(())
+}
+
 /// One iteration: manage, architect, dispatch builders, integrate, review. Returns merged count.
 pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporter>) -> Result<u32> {
     let sdir = ws.join(".agentloop/state");
@@ -320,6 +369,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     }
     reporter.status("manager", "done", &mtool, &mmodel);
     let _ = reopen_unapproved_done_tasks(&bk, ws)?;
+    repair_backlog(&bk, ws, maxatt)?;
 
     let ready_business = state::ready_items(&bk, ws, usize::MAX)?;
     for id in &ready_business {
@@ -815,6 +865,67 @@ mod tests {
             "plan is kept for inspection when the cap is hit"
         );
 
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repair_backlog_leaves_healthy_tasks_alone() {
+        let ws = tmp_ws("orch-healthy");
+        setup(&ws);
+        let bk = ws.join(".agentloop/state/backlog.json");
+
+        repair_backlog(&bk, &ws, 3).unwrap();
+
+        let v = state::read(&bk).unwrap();
+        assert_eq!(state::item(&v, "task-1").unwrap()["status"], "in_progress");
+        assert!(task_state::builders_path(&ws, "task-1").exists());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repair_backlog_flips_in_progress_without_plan_to_ready() {
+        let ws = tmp_ws("orch-noplan");
+        setup(&ws);
+        std::fs::remove_file(ws.join(".agentloop/state/tasks/task-1/builders.json")).unwrap();
+        let bk = ws.join(".agentloop/state/backlog.json");
+
+        repair_backlog(&bk, &ws, 3).unwrap();
+
+        let v = state::read(&bk).unwrap();
+        let task = state::item(&v, "task-1").unwrap();
+        assert_eq!(task["status"], "ready");
+        assert!(task["notes"].as_str().unwrap().contains("re-architecting"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repair_backlog_reopens_deadlocked_builder_plan() {
+        let ws = tmp_ws("orch-deadlock");
+        setup(&ws);
+        // Remaining ready builder deps on a failed one: never dispatchable.
+        std::fs::write(
+            ws.join(".agentloop/state/tasks/task-1/builders.json"),
+            r#"{"items":[
+                {"id":"task-1-b1","title":"t","desc":"d","deps":[],"status":"failed","attempts":3,"acceptance":"a"},
+                {"id":"task-1-b2","title":"t","desc":"d","deps":["task-1-b1"],"status":"ready","attempts":0,"acceptance":"a"}
+            ]}"#,
+        )
+        .unwrap();
+        let bk = ws.join(".agentloop/state/backlog.json");
+
+        repair_backlog(&bk, &ws, 3).unwrap();
+
+        let v = state::read(&bk).unwrap();
+        assert_eq!(state::item(&v, "task-1").unwrap()["status"], "ready");
+        assert!(
+            !task_state::builders_path(&ws, "task-1").exists(),
+            "deadlocked plan is invalidated for redesign"
+        );
+        assert_eq!(
+            task_state::read_redesign(&ws, "task-1").0,
+            1,
+            "deadlock consumes a redesign"
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 }
