@@ -122,9 +122,29 @@ sits at the bottom of the screen at all times (similar to Claude Code's input). 
 
 The status bar shows the goal, current iteration, gate state, open-item count, and a
 live `⏱` total-run-time readout; `✓ DONE · standby` appears when the run is idle and
-waiting. (Headless runs print the total elapsed time on exit.)
+waiting. (Headless runs print the total elapsed time on exit.) Long goals are ellipsized
+so the counters and timer always stay visible.
 
 The main panel is the Jobs list (full width).
+
+## Troubleshooting
+
+Nothing the loop produces is deleted:
+
+- `.agentloop/state/events.jsonl` — append-only history of every dispatch and
+  status transition (bounced/failed/merged/approved/rejected/redesign) with its
+  reason. `agentloop --report --workspace <dir>` prints all bounced and failed
+  cases plus what is currently failed in the backlog and builder plans.
+- `.agentloop/logs/iter-N/` — per-iteration agent logs, plus each builder's
+  archived result JSON (timestamp-prefixed).
+- `.agentloop/logs/gate.log` — every verify.sh run (timestamp, rc, full output);
+  `state/last_gate.txt` keeps just the latest.
+- `.agentloop/state/tasks/<id>/archive/` — superseded builder plans, designs,
+  customer reviews, and redesign counters.
+- `.agentloop/logs/answered-<id>-<ts>.json` — consumed agent questions.
+
+Before running, agentloop verifies that every CLI tool the config routes roles
+to (claude/codex) is installed, and exits with install instructions otherwise.
 
 ## Layout
 
@@ -142,6 +162,8 @@ src/
   customer.rs      acceptance-criteria approval prompt + validation
   task_state.rs    task-local design/builders/customer state helpers
   events.rs        Reporter trait, Event/Command enums, stderr + channel reporters
+  history.rs       append-only state/events.jsonl, artifact archiving, --report
+  preflight.rs     startup check that configured agent CLIs are installed
   inbox.rs         question/answer file IO + prior-Q&A prompt block (auto-answered)
   limits.rs        usage/rate-limit detection + auto-continue wait math
   requests.rs      pending user-request log (requests.jsonl) + manager prompt block
