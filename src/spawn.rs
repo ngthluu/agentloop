@@ -36,6 +36,8 @@ pub fn shutdown_requested() -> bool {
 
 /// Clear the shutdown flag. Used in tests that call kill_all_agents() and then need
 /// to run further agent operations in the same process. Not intended for production use.
+/// Kept `pub` (not `#[cfg(test)]`) because integration tests link the non-test build of this library.
+#[doc(hidden)]
 pub fn reset_shutdown_for_tests() {
     SHUTDOWN.store(false, Ordering::SeqCst);
 }
@@ -366,11 +368,15 @@ pub async fn agent_run(
 
     let mut waits = 0u32;
     loop {
+        // The log appends across attempts; remember where this attempt starts so
+        // detection below can't re-match limit text (or our own ⏳ note) from an
+        // earlier attempt.
+        let attempt_start = std::fs::metadata(log).map(|m| m.len()).unwrap_or(0);
         let code = run_with_timeout(&argv, cwd, log, t, stream_claude).await?;
         if code == 0 {
             return Ok(code);
         }
-        let tail = crate::limits::log_tail(log, 16 * 1024);
+        let tail = crate::limits::log_tail_from(log, attempt_start, 16 * 1024);
         let Some(limit) = crate::limits::detect_usage_limit(&tail) else {
             return Ok(code);
         };

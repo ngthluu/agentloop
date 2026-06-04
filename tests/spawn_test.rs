@@ -309,3 +309,63 @@ async fn agent_run_waits_out_usage_limit_and_auto_continues() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn agent_run_does_not_rescan_stale_limit_text_from_earlier_attempts() {
+    let _guard = ENV_LOCK.lock().await;
+    let dir = std::env::temp_dir().join(format!(
+        "limitstale-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mark = dir.join("first-done");
+    // First call: usage limit (reset in the past). Second call: a PLAIN failure
+    // with no limit text. The stale limit text from attempt one must not trigger
+    // another wait; agent_run returns the plain failure's exit code.
+    let stub = format!(
+        "#!/bin/bash\nif [ ! -f \"{mark}\" ]; then\n  touch \"{mark}\"\n  echo \"Claude AI usage limit reached|1700000000\"\n  exit 1\nfi\necho \"plain failure, no limit here\"\nexit 7\n",
+        mark = mark.display()
+    );
+    let stub_path = dir.join("stub.sh");
+    std::fs::write(&stub_path, stub).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    std::env::set_var("FAKE_AGENT", "1");
+    std::env::set_var("FAKE_AGENT_BIN", &stub_path);
+    std::env::set_var("AGENTLOOP_LIMIT_SLACK_SECS", "0");
+
+    let log = dir.join("agent.log");
+    let code = spawn::agent_run(
+        &cfg(),
+        "manager",
+        "HELLO",
+        &dir,
+        &log,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+
+    std::env::remove_var("FAKE_AGENT");
+    std::env::remove_var("FAKE_AGENT_BIN");
+    std::env::remove_var("AGENTLOOP_LIMIT_SLACK_SECS");
+
+    assert_eq!(
+        code, 7,
+        "second attempt's plain failure propagates, no spurious wait"
+    );
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        text.matches("auto-continuing").count(),
+        1,
+        "exactly one wait note (for the genuine limit): {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

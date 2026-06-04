@@ -68,12 +68,18 @@ fn env_secs(key: &str, default: u64) -> u64 {
 
 /// Last `max_bytes` of `path` as lossy UTF-8; "" when missing/unreadable.
 pub fn log_tail(path: &Path, max_bytes: u64) -> String {
+    log_tail_from(path, 0, max_bytes)
+}
+
+/// Like [`log_tail`], but never reads bytes before `start_offset` — used to scan
+/// only the latest attempt's output when a log accumulates across retries.
+pub fn log_tail_from(path: &Path, start_offset: u64, max_bytes: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = std::fs::File::open(path) else {
         return String::new();
     };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(max_bytes);
+    let start = len.saturating_sub(max_bytes).max(start_offset.min(len));
     if f.seek(SeekFrom::Start(start)).is_err() {
         return String::new();
     }
@@ -143,6 +149,29 @@ mod tests {
             wait_duration(&far, 1_700_000_000),
             Duration::from_secs(6 * 3600)
         );
+    }
+
+    #[test]
+    fn log_tail_from_skips_bytes_before_the_offset() {
+        let dir = std::env::temp_dir().join(format!(
+            "limits-tail-from-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.log");
+        std::fs::write(&p, "usage limit reached|1700000000\nattempt two output").unwrap();
+        let tail = log_tail_from(&p, 31, 16 * 1024);
+        assert_eq!(tail, "attempt two output");
+        assert!(
+            detect_usage_limit(&tail).is_none(),
+            "old limit text not rescanned"
+        );
+        // Offset beyond EOF is safe.
+        assert_eq!(log_tail_from(&p, 10_000, 16), "");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
