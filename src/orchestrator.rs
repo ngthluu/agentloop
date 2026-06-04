@@ -15,6 +15,32 @@ use crate::{architect, customer, manager, spawn, state, task_state, worker, work
 /// TUI / SIGINT / SIGTERM still kills it (no orphaned agent).
 const NO_TIMEOUT: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
 
+/// Canned reply for any question an agent raises: the loop is autonomous, so the
+/// "user" always delegates the decision back to the agent.
+pub const AUTO_ANSWER: &str = "Decide the best option for me — you decide. Pick whatever best serves the goal and the acceptance criteria, record your decision in the result summary, and continue.";
+
+/// Auto-answer a raised question with [`AUTO_ANSWER`] and re-queue the asking item.
+pub fn auto_answer(ws: &Path, item_id: &str) -> Result<()> {
+    apply_answer(ws, item_id, AUTO_ANSWER)
+}
+
+/// Auto-answer every outstanding question file (e.g. left by an interrupted older
+/// run) so the asking items re-enter the dispatchable set this round.
+fn auto_answer_pending(ws: &Path) {
+    let Ok(entries) = std::fs::read_dir(ws.join(".agentloop/questions")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if let Err(e) = auto_answer(ws, id) {
+            eprintln!("auto-answer failed for {id}: {e:#}");
+        }
+    }
+}
+
 /// Spawn an unbounded resolver agent in the main workspace to resolve an in-progress
 /// merge conflict for `id`, then complete the merge. Returns true if the merge is
 /// resolved and committed.
@@ -276,6 +302,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     let ldir = ws.join(format!(".agentloop/logs/iter-{n}"));
     std::fs::create_dir_all(&ldir)?;
     std::fs::create_dir_all(ws.join(".agentloop/results"))?;
+    auto_answer_pending(ws);
     let bk = sdir.join("backlog.json");
     let itimeout = Duration::from_secs(cfg.item_timeout_sec());
     let maxpar = cfg.max_parallel() as usize;
@@ -439,18 +466,15 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         let branch = format!("item/{id}");
 
         if status == "needs_input" {
-            // Agent is blocked on a user decision. Surface the question; block the
-            // item; do not merge. The question file lives in the main workspace
-            // (.agentloop/questions/<id>.json), so it survives worktree removal.
-            if let Ok(q) = crate::inbox::read_question(ws, id) {
-                let label = builder_item(ws, task_id, id)
-                    .ok()
-                    .flatten()
-                    .as_ref()
-                    .and_then(|i| i["title"].as_str().map(String::from))
-                    .unwrap_or_default();
-                reporter.question(id, &label, &q.question, &q.context);
-                task_state::set_builder_status(ws, task_id, id, "blocked", &q.question)?;
+            // Autonomous mode: never park the item on a human. Persist the canned
+            // "you decide" answer and re-dispatch with the prior Q&A appended to
+            // the builder prompt. Re-dispatch consumes an attempt, so a builder
+            // that asks forever still hits max_attempts -> redesign.
+            if crate::inbox::has_question(ws, id) {
+                if let Err(e) = auto_answer(ws, id) {
+                    eprintln!("auto-answer failed for {id}: {e:#}");
+                    task_state::set_builder_status(ws, task_id, id, "ready", "auto-answer failed")?;
+                }
             } else {
                 // Malformed/missing question file: treat as a normal non-done bounce.
                 task_state::set_builder_status(
@@ -460,8 +484,8 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "ready",
                     "needs_input without a question file",
                 )?;
-                reporter.status(id, "bounced", "", "");
             }
+            reporter.status(id, "bounced", "", "");
             worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
             let _ = std::fs::remove_file(&rfile);
             continue;
