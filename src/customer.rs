@@ -56,14 +56,15 @@ pub async fn customer_run(
 ) -> Result<bool> {
     let id = task["id"].as_str().unwrap_or("");
     if !id.is_empty() {
-        let _ = std::fs::remove_file(
-            ws.join(".agentloop/state/tasks")
-                .join(id)
-                .join("customer.json"),
+        // Archive (never delete) the previous round's review before re-running.
+        let dir = crate::task_state::task_dir(ws, id).join("archive");
+        let _ = crate::history::archive_file(
+            &ws.join(".agentloop/state/tasks").join(id).join("customer.json"),
+            &dir,
         );
-        let _ = std::fs::remove_file(
-            ws.join(".agentloop/results")
-                .join(format!("{id}-customer.json")),
+        let _ = crate::history::archive_file(
+            &ws.join(".agentloop/results").join(format!("{id}-customer.json")),
+            &dir,
         );
     }
 

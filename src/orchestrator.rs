@@ -223,16 +223,29 @@ fn customer_feedback(ws: &Path, task_id: &str) -> String {
         .unwrap_or_else(|| "customer rejected the completed task".to_string())
 }
 
+/// Retire a stale customer review into the task's archive dir (never deleted;
+/// rejected reviews are the troubleshooting trail for redesigns).
 fn clear_customer_review(ws: &Path, task_id: &str) {
-    let _ = std::fs::remove_file(task_state::customer_path(ws, task_id));
-    let _ = std::fs::remove_file(
-        ws.join(".agentloop/results")
+    let dir = task_state::task_dir(ws, task_id).join("archive");
+    let _ = crate::history::archive_file(&task_state::customer_path(ws, task_id), &dir);
+    let _ = crate::history::archive_file(
+        &ws.join(".agentloop/results")
             .join(format!("{task_id}-customer.json")),
+        &dir,
     );
 }
 
 fn invalidate_task_plan(ws: &Path, task_id: &str) {
-    let _ = std::fs::remove_file(task_state::builders_path(ws, task_id));
+    let dir = task_state::task_dir(ws, task_id).join("archive");
+    // The next architect pass overwrites design.md in place; keep a copy of the
+    // failed design alongside the failed plan.
+    let design = task_state::task_dir(ws, task_id).join("design.md");
+    if design.exists() {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::copy(&design, dir.join(format!("{stamp}-design.md")));
+    }
+    let _ = crate::history::archive_file(&task_state::builders_path(ws, task_id), &dir);
     clear_customer_review(ws, task_id);
 }
 
@@ -549,7 +562,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             };
             reporter.status(id, "bounced", "", "", note);
             worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
-            let _ = std::fs::remove_file(&rfile);
+            let _ = crate::history::archive_file(&rfile, &ldir);
             continue;
         }
 
@@ -610,7 +623,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             reporter.status(id, "failed", "", "", "did not report done (missing/invalid result file or status != done)");
         }
         worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
-        let _ = std::fs::remove_file(&rfile);
+        let _ = crate::history::archive_file(&rfile, &ldir);
     }
 
     for (task_id, note) in pending_redesign {
@@ -858,6 +871,20 @@ mod tests {
         let (count, fb) = task_state::read_redesign(&ws, "task-1");
         assert_eq!(count, 1);
         assert_eq!(fb, "gate failed");
+
+        let archive = ws.join(".agentloop/state/tasks/task-1/archive");
+        let archived_plan = std::fs::read_dir(&archive)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with("-builders.json"));
+        assert!(archived_plan, "invalidated plan is archived, not deleted");
+        let events = crate::history::read_events(&ws);
+        assert!(
+            events
+                .iter()
+                .any(|e| e["kind"] == "task" && e["id"] == "task-1" && e["status"] == "redesign"),
+            "redesign recorded in events.jsonl"
+        );
 
         let _ = std::fs::remove_dir_all(&ws);
     }

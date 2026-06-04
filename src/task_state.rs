@@ -62,9 +62,11 @@ pub fn bump_redesign(ws: &Path, task_id: &str, feedback: &str) -> Result<u32> {
     Ok(next)
 }
 
-/// Clear the redesign counter (called when the task is genuinely completed).
+/// Retire the redesign counter into the task's archive (called when the task is
+/// genuinely completed). Reads as (0, "") afterwards.
 pub fn reset_redesign(ws: &Path, task_id: &str) {
-    let _ = std::fs::remove_file(redesign_path(ws, task_id));
+    let dir = task_dir(ws, task_id).join("archive");
+    let _ = crate::history::archive_file(&redesign_path(ws, task_id), &dir);
 }
 
 pub fn read_builders(ws: &Path, task_id: &str) -> Result<Value> {

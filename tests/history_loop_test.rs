@@ -65,6 +65,31 @@ async fn happy_iteration_records_terminal_events() {
 }
 
 #[tokio::test]
+async fn builder_results_are_archived_into_the_iter_log_dir_not_deleted() {
+    let _env = ENV_LOCK.lock().await;
+    let ws = common::init_ws_with_stub();
+    set_env(&ws);
+
+    let merged = orchestrator::iterate(&cfg(), &ws, 1, &recording(&ws))
+        .await
+        .unwrap();
+    assert_eq!(merged, 1);
+
+    assert!(
+        !ws.join(".agentloop/results/task-1-b1.json").exists(),
+        "live results dir is still cleared for the next round"
+    );
+    let archived = std::fs::read_dir(ws.join(".agentloop/logs/iter-1"))
+        .unwrap()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with("-task-1-b1.json"));
+    assert!(archived, "builder result archived into .agentloop/logs/iter-1/");
+
+    clear_env();
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[tokio::test]
 async fn needs_input_bounce_is_recorded_with_reason() {
     let _env = ENV_LOCK.lock().await;
     let ws = common::init_ws_with_asking_stub();
