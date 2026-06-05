@@ -364,7 +364,7 @@ pub async fn run() -> Result<()> {
     }
 
     if is_tty {
-        let rc = crate::app::run_tui(cfg, ws.clone(), goal_text).await?;
+        let rc = crate::app::run_tui(cfg, cfg_path, ws.clone(), goal_text).await?;
         std::process::exit(rc);
     } else {
         let reporter: Arc<dyn Reporter> = Arc::new(RecordingReporter::new(

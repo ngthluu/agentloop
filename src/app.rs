@@ -130,7 +130,7 @@ fn install_panic_terminal_restore() {
     }));
 }
 
-pub async fn run_tui(cfg: Config, ws: PathBuf, goal: String) -> Result<i32> {
+pub async fn run_tui(cfg: Config, cfg_path: PathBuf, ws: PathBuf, goal: String) -> Result<i32> {
     install_panic_terminal_restore();
     #[cfg(unix)]
     install_tui_signal_handler();
@@ -152,6 +152,20 @@ pub async fn run_tui(cfg: Config, ws: PathBuf, goal: String) -> Result<i32> {
     #[cfg(unix)]
     let _stderr_guard = StderrRedirect::to_log(&ws.join(".agentloop/logs"));
     let mut state = AppState::new(goal);
+
+    // Seed the ctrl-o model-routing panel from the loaded config (BTreeMap:
+    // already sorted by role).
+    state.set_routing(
+        cfg.routing
+            .iter()
+            .map(|(name, r)| tui::RoleEntry {
+                role: name.clone(),
+                tool: r.tool.clone().unwrap_or_default(),
+                model: r.model.clone().unwrap_or_default(),
+                effort: r.effort.clone().unwrap_or_default(),
+            })
+            .collect(),
+    );
 
     // Track whether the orchestrator has disconnected its event sender.
     let mut orch_done = false;
@@ -185,6 +199,22 @@ pub async fn run_tui(cfg: Config, ws: PathBuf, goal: String) -> Result<i32> {
                     break Ok(());
                 }
                 if let Some(cmd) = state.on_key(k) {
+                    // Persist routing edits immediately: the orchestrator only
+                    // drains commands between rounds, and the pick must survive
+                    // this session even if the loop never reaches a drain point.
+                    if let Command::SetRole {
+                        role,
+                        tool,
+                        model,
+                        effort,
+                    } = &cmd
+                    {
+                        if let Err(e) =
+                            crate::config::update_role_file(&cfg_path, role, tool, model, effort)
+                        {
+                            eprintln!("failed to save model routing: {e:#}");
+                        }
+                    }
                     let quit = matches!(cmd, Command::Quit);
                     let _ = ctx.send(cmd);
                     if quit {
