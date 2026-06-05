@@ -997,6 +997,9 @@ pub async fn run_interactive(
     reporter: Arc<dyn Reporter>,
     crx: &mut mpsc::UnboundedReceiver<Command>,
 ) -> Result<i32> {
+    // Routing edits (Command::SetRole) apply mid-run: work on a local mutable
+    // copy of the config. Caps are read once — SetRole only touches routing.
+    let mut cfg = cfg.clone();
     let bk = ws.join(".agentloop/state/backlog.json");
     let maxit = cfg.max_iterations();
     let budget = Duration::from_secs(cfg.total_budget_sec());
@@ -1019,6 +1022,9 @@ pub async fn run_interactive(
             }
             // Stray add-task before the run starts: ignore.
             Some(Command::AddTask { .. }) => {}
+            Some(Command::SetRole { role, tool, model, effort }) => {
+                crate::config::apply_role(&mut cfg, &role, &tool, &model, &effort);
+            }
         }
     }
 
@@ -1043,6 +1049,9 @@ pub async fn run_interactive(
                         }
                     }
                     Command::StartRun { .. } => {}
+                    Command::SetRole { role, tool, model, effort } => {
+                        crate::config::apply_role(&mut cfg, &role, &tool, &model, &effort);
+                    }
                 }
             }
             // Quit/SIGINT must stop the loop at the next boundary even if the
@@ -1064,7 +1073,7 @@ pub async fn run_interactive(
 
             n += 1;
             iters_this_window += 1;
-            let merged = iterate(cfg, ws, n, &reporter).await?;
+            let merged = iterate(&cfg, ws, n, &reporter).await?;
             let _ = reopen_unapproved_done_tasks(&bk, ws)?;
             let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}")).await;
             let gate_state = if grc == 0 { "pass" } else { "fail" };
@@ -1085,20 +1094,27 @@ pub async fn run_interactive(
 
         // --- STANDBY phase ---
         reporter.standby(&standby_reason);
-        match crx.recv().await {
-            None | Some(Command::Quit) => return Ok(0),
-            Some(Command::AddTask { request }) => {
-                if let Err(e) = crate::requests::append(ws, &request) {
-                    reporter.status(
-                        "addtask",
-                        "failed",
-                        "",
-                        "",
-                        &format!("could not queue request: {e:#}"),
-                    );
+        loop {
+            match crx.recv().await {
+                None | Some(Command::Quit) => return Ok(0),
+                Some(Command::AddTask { request }) => {
+                    if let Err(e) = crate::requests::append(ws, &request) {
+                        reporter.status(
+                            "addtask",
+                            "failed",
+                            "",
+                            "",
+                            &format!("could not queue request: {e:#}"),
+                        );
+                    }
+                    break;
+                }
+                Some(Command::StartRun { .. }) => break,
+                // Routing edits don't re-engage the loop; keep waiting for work.
+                Some(Command::SetRole { role, tool, model, effort }) => {
+                    crate::config::apply_role(&mut cfg, &role, &tool, &model, &effort);
                 }
             }
-            Some(Command::StartRun { .. }) => {}
         }
         // Re-engage: fresh budget window + iteration allowance, reset stall.
         window_start = Instant::now();
