@@ -121,6 +121,67 @@ impl Config {
     }
 }
 
+/// Set one role's routing on an in-memory Config (TUI picker / Command::SetRole).
+/// Empty strings clear the field so the tool's own default applies.
+pub fn apply_role(cfg: &mut Config, role: &str, tool: &str, model: &str, effort: &str) {
+    let norm = |s: &str| {
+        let s = s.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
+    };
+    let entry = cfg.routing.entry(role.to_string()).or_default();
+    entry.tool = norm(tool);
+    entry.model = norm(model);
+    entry.effort = norm(effort);
+}
+
+/// Read-modify-write `routing.<role>` in the config file, preserving every other
+/// key (caps, defaults, unknown future fields). A missing file starts from the
+/// default config; an unparseable one is an error (never clobber a hand-edited
+/// file). Empty fields are omitted, so the tool's own default applies.
+pub fn update_role_file(
+    path: &Path,
+    role: &str,
+    tool: &str,
+    model: &str,
+    effort: &str,
+) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => DEFAULT_CONFIG_JSON.to_string(),
+    };
+    let mut root: serde_json::Value = serde_json::from_str(&text).context("parse config json")?;
+    let obj = root
+        .as_object_mut()
+        .context("config root is not a JSON object")?;
+    let routing = obj
+        .entry("routing")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("config routing is not a JSON object")?;
+
+    let mut entry = serde_json::Map::new();
+    for (key, value) in [("tool", tool), ("model", model), ("effort", effort)] {
+        let value = value.trim();
+        if !value.is_empty() {
+            entry.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+        }
+    }
+    routing.insert(role.to_string(), serde_json::Value::Object(entry));
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create config dir {}", parent.display()))?;
+    }
+    let pretty = serde_json::to_string_pretty(&root).context("serialize config")?;
+    std::fs::write(path, format!("{pretty}\n"))
+        .with_context(|| format!("write config {}", path.display()))?;
+    Ok(())
+}
+
 fn non_empty_env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).and_then(|value| {
         if value.is_empty() {
