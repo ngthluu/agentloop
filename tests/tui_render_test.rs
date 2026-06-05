@@ -27,6 +27,23 @@ fn started(goal: &str) -> AppState {
 }
 
 #[test]
+fn job_row_with_unpinned_model_shows_tool_only() {
+    let mut s = started("goal");
+    s.apply(Event::JobDispatched {
+        id: "it-1".into(),
+        label: "scaffold".into(),
+        tool: "codex".into(),
+        model: String::new(), // unpinned: tool default
+        log_path: None,
+    });
+    let backend = TestBackend::new(80, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+    assert!(find(&term, "[codex]").is_some(), "tool shown without a slash");
+    assert!(find(&term, "[codex/]").is_none(), "no dangling slash");
+}
+
+#[test]
 fn jobs_pane_renders_without_inbox() {
     let mut s = started("goal");
     s.apply(Event::JobDispatched {

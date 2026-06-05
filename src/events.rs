@@ -18,6 +18,16 @@ pub trait Reporter: Send + Sync {
     fn standby(&self, _reason: &str) {}
 }
 
+/// "tool/model" for display; just "tool" when no model is pinned (the tool's
+/// own default applies — codex model slugs churn, so unpinned is the norm).
+pub fn fmt_tool_model(tool: &str, model: &str) -> String {
+    if model.is_empty() {
+        tool.to_string()
+    } else {
+        format!("{tool}/{model}")
+    }
+}
+
 pub struct EventLineReporter;
 
 fn hms() -> String {
@@ -27,25 +37,29 @@ fn hms() -> String {
 impl Reporter for EventLineReporter {
     fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str, _log: Option<&Path>) {
         eprintln!(
-            "{}  dispatch {:<10} {}/{}  {}",
+            "{}  dispatch {:<10} {}  {}",
             hms(),
             id,
-            tool,
-            model,
+            fmt_tool_model(tool, model),
             label
         );
     }
     fn status(&self, id: &str, status: &str, tool: &str, model: &str, note: &str) {
         if note.is_empty() {
-            eprintln!("{}  {:<9} {:<10} {}/{}", hms(), status, id, tool, model);
-        } else {
             eprintln!(
-                "{}  {:<9} {:<10} {}/{}  {}",
+                "{}  {:<9} {:<10} {}",
                 hms(),
                 status,
                 id,
-                tool,
-                model,
+                fmt_tool_model(tool, model)
+            );
+        } else {
+            eprintln!(
+                "{}  {:<9} {:<10} {}  {}",
+                hms(),
+                status,
+                id,
+                fmt_tool_model(tool, model),
                 note
             );
         }

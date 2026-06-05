@@ -591,7 +591,13 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
             .map(|j| {
                 let glyph = status_glyph(&j.status);
                 let dur = j.elapsed().map(fmt_elapsed).unwrap_or_default();
-                let line = format!(" {} {} [{}/{}]  {}", glyph, j.label, j.tool, j.model, dur);
+                let line = format!(
+                    " {} {} [{}]  {}",
+                    glyph,
+                    j.label,
+                    crate::events::fmt_tool_model(&j.tool, &j.model),
+                    dur
+                );
                 ListItem::new(Line::from(line))
             })
             .collect();
@@ -799,11 +805,10 @@ fn render_job_detail(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout
             (
                 format!(" Job: {} \u{2014} {} ", j.id, j.label),
                 vec![Line::from(format!(
-                    " status: {} {}   tool: {}/{}   {}",
+                    " status: {} {}   tool: {}   {}",
                     status_glyph(&j.status),
                     j.status,
-                    j.tool,
-                    j.model,
+                    crate::events::fmt_tool_model(&j.tool, &j.model),
                     dur
                 ))],
             )

@@ -26,6 +26,14 @@ fn ellipsize_truncates_on_char_boundaries() {
 use agentloop::tui::tail_file;
 
 #[test]
+fn fmt_tool_model_omits_the_slash_when_no_model_is_pinned() {
+    use agentloop::events::fmt_tool_model;
+    assert_eq!(fmt_tool_model("codex", ""), "codex");
+    assert_eq!(fmt_tool_model("codex", "gpt-5.5"), "codex/gpt-5.5");
+    assert_eq!(fmt_tool_model("claude", "opus"), "claude/opus");
+}
+
+#[test]
 fn tail_file_returns_last_lines_or_placeholder() {
     // Missing file -> placeholder.
     let missing = std::env::temp_dir().join("altail-does-not-exist.log");
