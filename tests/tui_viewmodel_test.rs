@@ -1,5 +1,5 @@
 use agentloop::events::{Command, Event};
-use agentloop::tui::AppState;
+use agentloop::tui::{AppState, RoleEntry};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Drive an AppState past the goal-entry screen into the List view.
@@ -219,4 +219,140 @@ fn q_quits_from_job_detail_when_input_empty() {
         .on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
         .is_none());
     assert_eq!(s.input_buffer(), "xq");
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+/// An AppState seeded with two routing rows (sorted, as app.rs provides them).
+fn routed(goal: &str) -> AppState {
+    let mut s = AppState::new(goal.into());
+    s.set_routing(vec![
+        RoleEntry {
+            role: "architect".into(),
+            tool: "claude".into(),
+            model: "opus".into(),
+            effort: "high".into(),
+        },
+        RoleEntry {
+            role: "builder".into(),
+            tool: "codex".into(),
+            model: String::new(), // unpinned: tool default
+            effort: "high".into(),
+        },
+    ]);
+    s
+}
+
+#[test]
+fn ctrl_o_opens_model_config_and_esc_returns_to_the_previous_view() {
+    // From goal entry…
+    let mut s = routed("");
+    assert!(s.in_goal_entry());
+    assert!(s.on_key(ctrl('o')).is_none());
+    assert!(s.in_model_config());
+    assert!(s.on_key(key(KeyCode::Esc)).is_none());
+    assert!(s.in_goal_entry(), "esc returns to where ctrl-o was pressed");
+
+    // …and from the list view.
+    let mut s = routed("g");
+    s.on_key(key(KeyCode::Enter)); // commit goal -> List
+    s.on_key(ctrl('o'));
+    assert!(s.in_model_config());
+    s.on_key(ctrl('o')); // ctrl-o also closes
+    assert!(!s.in_model_config() && !s.in_goal_entry());
+}
+
+#[test]
+fn arrows_move_the_cell_cursor_within_bounds() {
+    let mut s = routed("");
+    s.on_key(ctrl('o'));
+    assert_eq!(s.model_selection(), (0, 0));
+    s.on_key(key(KeyCode::Up)); // already at the top
+    s.on_key(key(KeyCode::Left)); // already leftmost
+    assert_eq!(s.model_selection(), (0, 0));
+    s.on_key(key(KeyCode::Down));
+    s.on_key(key(KeyCode::Right));
+    s.on_key(key(KeyCode::Right));
+    s.on_key(key(KeyCode::Right)); // clamped at effort
+    assert_eq!(s.model_selection(), (1, 2));
+    s.on_key(key(KeyCode::Down)); // clamped at the last row
+    assert_eq!(s.model_selection(), (1, 2));
+}
+
+#[test]
+fn enter_on_tool_cycles_claude_codex_and_emits_set_role() {
+    let mut s = routed("");
+    s.on_key(ctrl('o')); // row 0 = architect, col 0 = tool
+    let cmd = s.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(
+            cmd,
+            Some(Command::SetRole { ref role, ref tool, ref model, ref effort })
+                if role == "architect" && tool == "codex" && model == "opus" && effort == "high"
+        ),
+        "got {cmd:?}"
+    );
+    assert_eq!(s.model_rows()[0].tool, "codex");
+    // Cycles back.
+    let cmd = s.on_key(key(KeyCode::Enter));
+    assert!(matches!(cmd, Some(Command::SetRole { ref tool, .. }) if tool == "claude"));
+}
+
+#[test]
+fn editing_model_commits_on_enter_and_emits_set_role() {
+    let mut s = routed("");
+    s.on_key(ctrl('o'));
+    s.on_key(key(KeyCode::Down)); // builder row
+    s.on_key(key(KeyCode::Right)); // model column
+    assert!(s.on_key(key(KeyCode::Enter)).is_none(), "enter starts the edit");
+    assert_eq!(s.model_edit_buffer(), Some(""), "unpinned model edits from empty");
+    for c in "gpt-5.5".chars() {
+        s.on_key(key(KeyCode::Char(c)));
+    }
+    let cmd = s.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(
+            cmd,
+            Some(Command::SetRole { ref role, ref model, .. })
+                if role == "builder" && model == "gpt-5.5"
+        ),
+        "got {cmd:?}"
+    );
+    assert_eq!(s.model_rows()[1].model, "gpt-5.5");
+    assert_eq!(s.model_edit_buffer(), None, "edit closed after commit");
+}
+
+#[test]
+fn esc_cancels_an_edit_without_committing() {
+    let mut s = routed("");
+    s.on_key(ctrl('o'));
+    s.on_key(key(KeyCode::Right)); // architect / model
+    s.on_key(key(KeyCode::Enter)); // edit "opus"
+    s.on_key(key(KeyCode::Char('X')));
+    assert!(s.on_key(key(KeyCode::Esc)).is_none());
+    assert_eq!(s.model_rows()[0].model, "opus", "value unchanged");
+    assert!(s.in_model_config(), "esc in an edit closes the edit, not the panel");
+}
+
+#[test]
+fn clearing_a_model_commits_empty_meaning_tool_default() {
+    let mut s = routed("");
+    s.on_key(ctrl('o'));
+    s.on_key(key(KeyCode::Right)); // architect / model
+    s.on_key(key(KeyCode::Enter)); // edit "opus"
+    for _ in 0..4 {
+        s.on_key(key(KeyCode::Backspace));
+    }
+    let cmd = s.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(cmd, Some(Command::SetRole { ref model, .. }) if model.is_empty()),
+        "empty model = unset = tool default, got {cmd:?}"
+    );
+    assert_eq!(s.model_rows()[0].model, "");
 }

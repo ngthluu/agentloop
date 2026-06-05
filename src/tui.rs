@@ -20,11 +20,32 @@ impl Job {
     }
 }
 
+/// One role's routing as shown/edited in the ctrl-o model-config panel.
+/// Empty model/effort = unset: the tool's own default applies.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoleEntry {
+    pub role: String,
+    pub tool: String,
+    pub model: String,
+    pub effort: String,
+}
+
+/// The full row snapshot as a SetRole command (empty fields = tool default).
+fn set_role_cmd(row: &RoleEntry) -> Command {
+    Command::SetRole {
+        role: row.role.clone(),
+        tool: row.tool.clone(),
+        model: row.model.clone(),
+        effort: row.effort.clone(),
+    }
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum View {
     GoalEntry,
     List,
     JobDetail,
+    ModelConfig,
 }
 
 pub struct AppState {
@@ -41,6 +62,12 @@ pub struct AppState {
     selected_job: usize,
     log_scroll: u16,
     started: std::time::Instant,
+    // ctrl-o model-config panel state.
+    roles: Vec<RoleEntry>,
+    prev_view: View,
+    cfg_row: usize,
+    cfg_col: usize, // 0 = tool, 1 = model, 2 = effort
+    cfg_edit: Option<String>,
 }
 
 impl AppState {
@@ -59,6 +86,11 @@ impl AppState {
             selected_job: 0,
             log_scroll: 0,
             started: std::time::Instant::now(),
+            roles: vec![],
+            prev_view: View::GoalEntry,
+            cfg_row: 0,
+            cfg_col: 0,
+            cfg_edit: None,
         }
     }
 
@@ -122,10 +154,24 @@ impl AppState {
 
     /// Map a key to an optional Command. Returns None when the key only changes UI state.
     pub fn on_key(&mut self, k: KeyEvent) -> Option<Command> {
+        // ctrl-o toggles the model-routing panel from any view.
+        if k.code == KeyCode::Char('o')
+            && k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+        {
+            if self.view == View::ModelConfig {
+                self.cfg_edit = None;
+                self.view = self.prev_view;
+            } else {
+                self.prev_view = self.view;
+                self.view = View::ModelConfig;
+            }
+            return None;
+        }
         match self.view {
             View::GoalEntry => self.on_key_goal_entry(k),
             View::JobDetail => self.on_key_job_detail(k),
             View::List => self.on_key_list(k),
+            View::ModelConfig => self.on_key_model_config(k),
         }
     }
 
@@ -252,6 +298,85 @@ impl AppState {
         }
     }
 
+    fn on_key_model_config(&mut self, k: KeyEvent) -> Option<Command> {
+        // Editing a cell: keys go to the edit buffer until Enter commits / Esc cancels.
+        if self.cfg_edit.is_some() {
+            match k.code {
+                KeyCode::Enter => {
+                    let value = self.cfg_edit.take().unwrap_or_default().trim().to_string();
+                    let col = self.cfg_col;
+                    let row = self.roles.get_mut(self.cfg_row)?;
+                    if col == 1 {
+                        row.model = value;
+                    } else {
+                        row.effort = value;
+                    }
+                    return Some(set_role_cmd(row));
+                }
+                KeyCode::Esc => self.cfg_edit = None,
+                KeyCode::Backspace => {
+                    if let Some(buf) = self.cfg_edit.as_mut() {
+                        buf.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(buf) = self.cfg_edit.as_mut() {
+                        buf.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return None;
+        }
+        match k.code {
+            KeyCode::Esc => {
+                self.view = self.prev_view;
+                None
+            }
+            KeyCode::Up => {
+                self.cfg_row = self.cfg_row.saturating_sub(1);
+                None
+            }
+            KeyCode::Down => {
+                if self.cfg_row + 1 < self.roles.len() {
+                    self.cfg_row += 1;
+                }
+                None
+            }
+            KeyCode::Left => {
+                self.cfg_col = self.cfg_col.saturating_sub(1);
+                None
+            }
+            KeyCode::Right => {
+                if self.cfg_col < 2 {
+                    self.cfg_col += 1;
+                }
+                None
+            }
+            KeyCode::Enter => {
+                let col = self.cfg_col;
+                let row = self.roles.get_mut(self.cfg_row)?;
+                if col == 0 {
+                    // Only two known tools; Enter cycles instead of free text.
+                    row.tool = if row.tool == "claude" {
+                        "codex".into()
+                    } else {
+                        "claude".into()
+                    };
+                    Some(set_role_cmd(row))
+                } else {
+                    self.cfg_edit = Some(if col == 1 {
+                        row.model.clone()
+                    } else {
+                        row.effort.clone()
+                    });
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Submit the current input as a new task for the manager. Clears the input.
     fn submit(&mut self) -> Option<Command> {
         let text = self.input.trim().to_string();
@@ -272,6 +397,31 @@ impl AppState {
 
     pub fn in_goal_entry(&self) -> bool {
         self.view == View::GoalEntry
+    }
+
+    /// Seed the ctrl-o panel rows (sorted by role; from the loaded config).
+    pub fn set_routing(&mut self, roles: Vec<RoleEntry>) {
+        self.roles = roles;
+        self.cfg_row = 0;
+        self.cfg_col = 0;
+    }
+
+    pub fn in_model_config(&self) -> bool {
+        self.view == View::ModelConfig
+    }
+
+    pub fn model_rows(&self) -> &[RoleEntry] {
+        &self.roles
+    }
+
+    /// (row, col) of the panel's cell cursor; col 0 = tool, 1 = model, 2 = effort.
+    pub fn model_selection(&self) -> (usize, usize) {
+        (self.cfg_row, self.cfg_col)
+    }
+
+    /// The in-progress cell edit, if any.
+    pub fn model_edit_buffer(&self) -> Option<&str> {
+        self.cfg_edit.as_deref()
     }
 
     pub fn goal_continue_focused(&self) -> bool {
