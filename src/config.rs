@@ -243,7 +243,10 @@ pub fn update_role_file(
     for (key, value) in [("tool", tool), ("model", model), ("effort", effort)] {
         let value = value.trim();
         if !value.is_empty() {
-            entry.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+            entry.insert(
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
         }
     }
     routing.insert(role.to_string(), serde_json::Value::Object(entry));
@@ -262,8 +265,7 @@ pub fn update_role_file(
     if let Ok(f) = std::fs::File::open(&tmp) {
         let _ = f.sync_all();
     }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("replace config {}", path.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("replace config {}", path.display()))?;
     Ok(())
 }
 

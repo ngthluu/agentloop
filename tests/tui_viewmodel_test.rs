@@ -310,8 +310,15 @@ fn editing_model_commits_on_enter_and_emits_set_role() {
     s.on_key(ctrl('o'));
     s.on_key(key(KeyCode::Down)); // builder row
     s.on_key(key(KeyCode::Right)); // model column
-    assert!(s.on_key(key(KeyCode::Enter)).is_none(), "enter starts the edit");
-    assert_eq!(s.model_edit_buffer(), Some(""), "unpinned model edits from empty");
+    assert!(
+        s.on_key(key(KeyCode::Enter)).is_none(),
+        "enter starts the edit"
+    );
+    assert_eq!(
+        s.model_edit_buffer(),
+        Some(""),
+        "unpinned model edits from empty"
+    );
     for c in "gpt-5.5".chars() {
         s.on_key(key(KeyCode::Char(c)));
     }
@@ -337,7 +344,10 @@ fn esc_cancels_an_edit_without_committing() {
     s.on_key(key(KeyCode::Char('X')));
     assert!(s.on_key(key(KeyCode::Esc)).is_none());
     assert_eq!(s.model_rows()[0].model, "opus", "value unchanged");
-    assert!(s.in_model_config(), "esc in an edit closes the edit, not the panel");
+    assert!(
+        s.in_model_config(),
+        "esc in an edit closes the edit, not the panel"
+    );
 }
 
 #[test]
@@ -363,7 +373,10 @@ fn editing_effort_commits_on_enter_and_emits_set_role() {
     s.on_key(ctrl('o'));
     s.on_key(key(KeyCode::Right));
     s.on_key(key(KeyCode::Right)); // effort column
-    assert!(s.on_key(key(KeyCode::Enter)).is_none(), "enter starts the edit");
+    assert!(
+        s.on_key(key(KeyCode::Enter)).is_none(),
+        "enter starts the edit"
+    );
     assert_eq!(s.model_edit_buffer(), Some("high"));
     for _ in 0..4 {
         s.on_key(key(KeyCode::Backspace));

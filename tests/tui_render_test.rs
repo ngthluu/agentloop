@@ -39,7 +39,10 @@ fn job_row_with_unpinned_model_shows_tool_only() {
     let backend = TestBackend::new(80, 24);
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|f| tui::render(f, &s)).unwrap();
-    assert!(find(&term, "[codex]").is_some(), "tool shown without a slash");
+    assert!(
+        find(&term, "[codex]").is_some(),
+        "tool shown without a slash"
+    );
     assert!(find(&term, "[codex/]").is_none(), "no dangling slash");
 }
 
@@ -217,7 +220,10 @@ fn model_config_panel_renders_roles_values_and_defaults() {
     let mut term = Terminal::new(backend).unwrap();
     term.draw(|f| tui::render(f, &s)).unwrap();
 
-    assert!(find(&term, "Model routing").is_some(), "panel title rendered");
+    assert!(
+        find(&term, "Model routing").is_some(),
+        "panel title rendered"
+    );
     assert!(find(&term, "architect").is_some());
     assert!(find(&term, "opus").is_some());
     assert!(

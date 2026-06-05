@@ -156,7 +156,8 @@ impl AppState {
     pub fn on_key(&mut self, k: KeyEvent) -> Option<Command> {
         // ctrl-o toggles the model-routing panel from any view.
         if k.code == KeyCode::Char('o')
-            && k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            && k.modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
         {
             if self.view == View::ModelConfig {
                 self.cfg_edit = None;
@@ -705,8 +706,10 @@ fn render_goal_entry(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout
     );
     f.render_widget(button, chunks[3]);
 
-    let hint = Paragraph::new(Line::from(" [ctrl-o] models — pick tool/model/effort per role"))
-        .style(Style::default().fg(Color::DarkGray));
+    let hint = Paragraph::new(Line::from(
+        " [ctrl-o] models — pick tool/model/effort per role",
+    ))
+    .style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint, chunks[4]);
 }
 
@@ -723,7 +726,10 @@ fn render_model_config(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layo
 
     let (sel_row, sel_col) = s.model_selection();
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        format!(" {:<12} {:<10} {:<24} {:<10}", "role", "tool", "model", "effort"),
+        format!(
+            " {:<12} {:<10} {:<24} {:<10}",
+            "role", "tool", "model", "effort"
+        ),
         Style::default().fg(Color::DarkGray),
     ))];
     for (i, row) in s.model_rows().iter().enumerate() {

@@ -151,7 +151,10 @@ fn update_role_file_rewrites_one_role_and_preserves_the_rest() {
     assert_eq!(v["routing"]["builder"]["tool"], "codex");
     assert_eq!(v["routing"]["builder"]["model"], "gpt-5.5");
     assert_eq!(v["routing"]["builder"]["effort"], "medium");
-    assert_eq!(v["routing"]["manager"]["model"], "opus", "other roles untouched");
+    assert_eq!(
+        v["routing"]["manager"]["model"], "opus",
+        "other roles untouched"
+    );
     assert_eq!(v["caps"]["max_iterations"], 7, "caps preserved");
     assert_eq!(v["future_key"]["keep"], true, "unknown keys preserved");
 }
@@ -165,8 +168,14 @@ fn update_role_file_omits_empty_fields_so_tool_defaults_apply() {
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(v["routing"]["builder"]["tool"], "codex");
-    assert!(v["routing"]["builder"].get("model").is_none(), "empty model omitted");
-    assert!(v["routing"]["builder"].get("effort").is_none(), "empty effort omitted");
+    assert!(
+        v["routing"]["builder"].get("model").is_none(),
+        "empty model omitted"
+    );
+    assert!(
+        v["routing"]["builder"].get("effort").is_none(),
+        "empty effort omitted"
+    );
     let cfg = Config::load(&path).unwrap();
     assert_eq!(cfg.role_field("builder", "model"), None);
 }
@@ -213,11 +222,18 @@ fn apply_role_updates_in_memory_routing_and_clears_empty_fields() {
     agentloop::config::apply_role(&mut cfg, "builder", "claude", "opus", "");
     assert_eq!(cfg.role_field("builder", "tool").as_deref(), Some("claude"));
     assert_eq!(cfg.role_field("builder", "model").as_deref(), Some("opus"));
-    assert_eq!(cfg.role_field("builder", "effort"), None, "empty clears the field");
+    assert_eq!(
+        cfg.role_field("builder", "effort"),
+        None,
+        "empty clears the field"
+    );
 
     // Unknown role: the entry is created.
     agentloop::config::apply_role(&mut cfg, "reviewer", "claude", "sonnet", "medium");
-    assert_eq!(cfg.role_field("reviewer", "tool").as_deref(), Some("claude"));
+    assert_eq!(
+        cfg.role_field("reviewer", "tool").as_deref(),
+        Some("claude")
+    );
 }
 
 #[test]
@@ -233,5 +249,8 @@ fn update_role_file_leaves_no_temp_files_behind() {
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|n| n.ends_with(".tmp"))
         .collect();
-    assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "temp files left behind: {leftovers:?}"
+    );
 }

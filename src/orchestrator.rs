@@ -1094,7 +1094,12 @@ pub async fn run_interactive(
             }
             // Stray add-task before the run starts: ignore.
             Some(Command::AddTask { .. }) => {}
-            Some(Command::SetRole { role, tool, model, effort }) => {
+            Some(Command::SetRole {
+                role,
+                tool,
+                model,
+                effort,
+            }) => {
                 crate::config::apply_role(&mut cfg, &role, &tool, &model, &effort);
             }
         }
@@ -1121,7 +1126,12 @@ pub async fn run_interactive(
                         }
                     }
                     Command::StartRun { .. } => {}
-                    Command::SetRole { role, tool, model, effort } => {
+                    Command::SetRole {
+                        role,
+                        tool,
+                        model,
+                        effort,
+                    } => {
                         crate::config::apply_role(&mut cfg, &role, &tool, &model, &effort);
                     }
                 }
@@ -1147,8 +1157,7 @@ pub async fn run_interactive(
             iters_this_window += 1;
             let merged = iterate(&cfg, ws, n, &reporter).await?;
             let _ = reopen_unapproved_done_tasks(&bk, ws)?;
-            let grc =
-                gate_reported(ws, &reporter, &format!("verify gate · iter {n}"), None).await;
+            let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}"), None).await;
             let gate_state = if grc == 0 { "pass" } else { "fail" };
             let open = state::open_count(&bk)?;
             let failed = state::failed_count(&bk)?;
@@ -1186,7 +1195,12 @@ pub async fn run_interactive(
                 // standby StartRun is a re-engage only (same as pre-restructure).
                 Some(Command::StartRun { .. }) => break,
                 // Routing edits don't re-engage the loop; keep waiting for work.
-                Some(Command::SetRole { role, tool, model, effort }) => {
+                Some(Command::SetRole {
+                    role,
+                    tool,
+                    model,
+                    effort,
+                }) => {
                     crate::config::apply_role(&mut cfg, &role, &tool, &model, &effort);
                 }
             }
@@ -1380,7 +1394,11 @@ mod tests {
     fn gate_failure_feedback_blames_the_scoped_task_and_demands_product_fixes() {
         let ws = tmp_ws("orch-feedback-scope");
         std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
-        std::fs::write(ws.join(".agentloop/state/last_gate.txt"), "assertion failed").unwrap();
+        std::fs::write(
+            ws.join(".agentloop/state/last_gate.txt"),
+            "assertion failed",
+        )
+        .unwrap();
 
         let note = gate_failure_feedback(&ws, "task-7");
 

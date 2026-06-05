@@ -101,8 +101,12 @@ pub enum Event {
 /// UI -> orchestrator.
 #[derive(Debug, Clone)]
 pub enum Command {
-    StartRun { goal: String },
-    AddTask { request: String },
+    StartRun {
+        goal: String,
+    },
+    AddTask {
+        request: String,
+    },
     /// Update one role's routing (empty field = unset → the tool's own
     /// default). Persisted to the config file by the TUI layer; applied to the
     /// running loop's in-memory config at the orchestrator's next command drain.
