@@ -45,8 +45,19 @@ BUILDER ITEM:
   done when: {acc}
 
 Rules:
+- ALWAYS use sub-agents: delegate codebase exploration, each implementation chunk, and
+  build/test runs to sub-agents, keeping your own context for orchestration — the design,
+  the plan, dispatching, and reviewing diffs. This is how you deliver a large item without
+  exhausting your context window. If your environment has no sub-agent capability, emulate
+  it: work one chunk at a time and never hold more files in context than the current chunk
+  needs.
 - Make focused commits in this worktree as you go.
-- Verify your work against the builder item and parent business acceptance criteria before finishing.
+- Prove your work by building the project and running its tests. Add or extend tests in the
+  project's normal test suite alongside your feature code — that is where verification lives.
+- NEVER create standalone verification scripts, runners, audits, or evidence/proof documents.
+  Your deliverable is working product code and its tests, nothing else.
+- Never create or edit .agentloop/verify.sh, and do not write under .agentloop/ except the
+  result/question files named below.
 - When finished, write {ws}/.agentloop/results/{id}.json:
   {{"status":"done|failed","summary":"one line","files_changed":["..."]}}
 - Open decisions are yours: when you hit a product or technical choice, pick the option
@@ -110,4 +121,29 @@ pub async fn builder_dispatch(
 ) -> Result<i32> {
     let prompt = builder_prompt(ws, parent, item);
     spawn::agent_run(cfg, "builder", &prompt, wt, log, t).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn builder_prompt_routes_verification_into_the_project_test_suite() {
+        let ws = std::env::temp_dir().join("worker-prompt-test");
+        let parent = json!({"id":"task-1","title":"Login","desc":"d","acceptance":"a"});
+        let item = json!({"id":"task-1-b1","title":"t","desc":"d","acceptance":"a"});
+
+        let p = builder_prompt(&ws, &parent, &item);
+        // Items are sized for one builder orchestrating sub-agents; the prompt
+        // must mandate delegation so big items fit in the session's context.
+        assert!(p.contains("ALWAYS use sub-agents"));
+        assert!(p.contains("context window"));
+        // Verification belongs in the project's normal test suite, not in
+        // standalone verifier scripts / evidence docs (the dominant failure
+        // mode observed: 58% of commits were verify churn).
+        assert!(p.contains("project's normal test suite"));
+        assert!(p.contains("NEVER create standalone verification scripts"));
+        assert!(p.contains("Never create or edit .agentloop/verify.sh"));
+    }
 }

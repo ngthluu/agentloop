@@ -155,7 +155,12 @@ const GATE_TIMEOUT_SECS: u64 = 1800;
 /// Run verify.sh; capture output to last_gate.txt (latest run) and append it to
 /// logs/gate.log (every run, forever); return its exit code (1 if absent,
 /// 124 on timeout).
-pub fn gate(ws: &Path) -> i32 {
+///
+/// `scope` is the task id under acceptance, passed to verify.sh as $1 so the
+/// script can run only that task's checks. The no-arg (None) run is the global
+/// DONE gate. Without scoping, one task's flaky verifier failed the acceptance
+/// gate of every other task and cascaded unrelated redesigns.
+pub fn gate(ws: &Path, scope: Option<&str>) -> i32 {
     let gate = ws.join(".agentloop/verify.sh");
     let out = ws.join(".agentloop/state/last_gate.txt");
     let timeout = Duration::from_secs(crate::limits::env_secs(
@@ -163,7 +168,7 @@ pub fn gate(ws: &Path) -> i32 {
         GATE_TIMEOUT_SECS,
     ));
     let (code, buf): (i32, Vec<u8>) = if gate.exists() {
-        run_gate_script(ws, &gate, timeout)
+        run_gate_script(ws, &gate, timeout, scope)
     } else {
         (1, b"no verify.sh yet".to_vec())
     };
@@ -181,13 +186,22 @@ pub fn gate(ws: &Path) -> i32 {
 /// On timeout the whole group gets SIGTERM, a 1s grace, then SIGKILL — same
 /// discipline as agent spawns. The group is registered so quit/SIGINT
 /// (kill_all_agents) reaps an in-flight gate too.
-fn run_gate_script(ws: &Path, script: &Path, timeout: Duration) -> (i32, Vec<u8>) {
+fn run_gate_script(
+    ws: &Path,
+    script: &Path,
+    timeout: Duration,
+    scope: Option<&str>,
+) -> (i32, Vec<u8>) {
     use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
-    let child = std::process::Command::new("/bin/bash")
-        .arg(script)
+    let mut cmd = std::process::Command::new("/bin/bash");
+    cmd.arg(script);
+    if let Some(task_id) = scope {
+        cmd.arg(task_id);
+    }
+    let child = cmd
         .current_dir(ws)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -281,7 +295,12 @@ fn append_gate_log(ws: &Path, code: i32, output: &[u8]) {
 /// and an unreported gate makes the loop look dead while it grinds — the job
 /// row is the only signal that the run is still working. The gate itself runs
 /// on the blocking pool so a long verify.sh never stalls a runtime worker.
-async fn gate_reported(ws: &Path, reporter: &Arc<dyn Reporter>, label: &str) -> i32 {
+async fn gate_reported(
+    ws: &Path,
+    reporter: &Arc<dyn Reporter>,
+    label: &str,
+    scope: Option<&str>,
+) -> i32 {
     reporter.dispatch(
         "gate",
         label,
@@ -290,7 +309,8 @@ async fn gate_reported(ws: &Path, reporter: &Arc<dyn Reporter>, label: &str) -> 
         Some(&ws.join(".agentloop/state/last_gate.txt")),
     );
     let ws2 = ws.to_path_buf();
-    let rc = tokio::task::spawn_blocking(move || gate(&ws2))
+    let scope2 = scope.map(str::to_string);
+    let rc = tokio::task::spawn_blocking(move || gate(&ws2, scope2.as_deref()))
         .await
         .unwrap_or(1);
     if rc == 0 {
@@ -469,20 +489,30 @@ fn reopen_parent_for_redesign(
 /// since the bloated backlog persists across runs.
 const FEEDBACK_MAX_BYTES: u64 = 8 * 1024;
 
-fn gate_failure_feedback(ws: &Path) -> String {
+/// Redesign feedback for a failed task-scoped gate run. The wording steers the
+/// next architect pass at the FEATURE, not the gate: fed back verbatim, plain
+/// "verify.sh failed" output taught architects to plan verifier scripts,
+/// runners, and evidence documents instead of product code (observed: 80% of
+/// all builder items across a real run were verification tooling).
+fn gate_failure_feedback(ws: &Path, task_id: &str) -> String {
     let path = ws.join(".agentloop/state/last_gate.txt");
     let full_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let output = crate::limits::log_tail(&path, FEEDBACK_MAX_BYTES)
         .trim()
         .to_string();
+    let header = format!(
+        "verify gate failed for {task_id} — the feature does not behave as required. \
+         Redesign must fix the product behavior; do not build verification tooling, \
+         gate scripts, or evidence documents in response."
+    );
     if output.is_empty() {
-        "verify.sh failed; redesign required".to_string()
+        header
     } else if full_len > FEEDBACK_MAX_BYTES {
         format!(
-            "verify.sh failed; redesign required (output truncated to the last {FEEDBACK_MAX_BYTES} bytes; full output in .agentloop/state/last_gate.txt):\n{output}"
+            "{header} (output truncated to the last {FEEDBACK_MAX_BYTES} bytes; full output in .agentloop/state/last_gate.txt):\n{output}"
         )
     } else {
-        format!("verify.sh failed; redesign required:\n{output}")
+        format!("{header}\n{output}")
     }
 }
 
@@ -585,6 +615,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     let itimeout = Duration::from_secs(cfg.item_timeout_sec());
     let maxpar = cfg.max_parallel() as usize;
     let maxatt = cfg.max_attempts();
+    let maxred = cfg.max_redesigns();
 
     let mrole = cfg.resolve_role("manager").unwrap_or_default();
     let mtool = cfg.role_field(&mrole, "tool").unwrap_or_default();
@@ -620,7 +651,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     }
     reporter.status("manager", "done", &mtool, &mmodel, "");
     let _ = reopen_unapproved_done_tasks(&bk, ws)?;
-    repair_backlog(&bk, ws, maxatt)?;
+    repair_backlog(&bk, ws, maxred)?;
 
     let ready_business = state::ready_items(&bk, ws, usize::MAX)?;
     for id in &ready_business {
@@ -696,7 +727,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                 {
                     pending_redesign.insert(task_id.clone(), note);
                 } else {
-                    reopen_parent_for_redesign(&bk, ws, task_id, &note, maxatt)?;
+                    reopen_parent_for_redesign(&bk, ws, task_id, &note, maxred)?;
                 }
                 break;
             }
@@ -730,7 +761,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                 {
                     pending_redesign.insert(task_id.clone(), note);
                 } else {
-                    reopen_parent_for_redesign(&bk, ws, task_id, &note, maxatt)?;
+                    reopen_parent_for_redesign(&bk, ws, task_id, &note, maxred)?;
                 }
                 break;
             }
@@ -903,7 +934,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     }
 
     for (task_id, note) in pending_redesign {
-        reopen_parent_for_redesign(&bk, ws, &task_id, &note, maxatt)?;
+        reopen_parent_for_redesign(&bk, ws, &task_id, &note, maxred)?;
     }
 
     for task_id in active_business_ids(&bk, ws)? {
@@ -912,9 +943,13 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         {
             continue;
         }
-        if gate_reported(ws, reporter, &format!("verify gate · {task_id}")).await != 0 {
-            let feedback = gate_failure_feedback(ws);
-            reopen_parent_for_redesign(&bk, ws, &task_id, &feedback, maxatt)?;
+        // Task-scoped acceptance run: verify.sh gets the task id as $1 so this
+        // task is judged on its own checks — a flaky verifier belonging to some
+        // other task must not burn this one's redesign budget.
+        let label = format!("verify gate · {task_id}");
+        if gate_reported(ws, reporter, &label, Some(&task_id)).await != 0 {
+            let feedback = gate_failure_feedback(ws, &task_id);
+            reopen_parent_for_redesign(&bk, ws, &task_id, &feedback, maxred)?;
             continue;
         }
         let backlog = state::read(&bk)?;
@@ -933,7 +968,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             reporter.status(&cid, "approved", &ctool, &cmodel, "");
         } else {
             let feedback = customer_feedback(ws, &task_id);
-            reopen_parent_for_redesign(&bk, ws, &task_id, &feedback, maxatt)?;
+            reopen_parent_for_redesign(&bk, ws, &task_id, &feedback, maxred)?;
             reporter.status(&cid, "rejected", &ctool, &cmodel, &feedback);
         }
     }
@@ -965,7 +1000,7 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
         let merged = iterate(cfg, ws, n, &reporter).await?;
         let _ = reopen_unapproved_done_tasks(&bk, ws)?;
 
-        let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}")).await;
+        let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}"), None).await;
         let gate_state = if grc == 0 { "pass" } else { "fail" };
         let open = state::open_count(&bk)?;
         let failed = state::failed_count(&bk)?;
@@ -1075,7 +1110,8 @@ pub async fn run_interactive(
             iters_this_window += 1;
             let merged = iterate(&cfg, ws, n, &reporter).await?;
             let _ = reopen_unapproved_done_tasks(&bk, ws)?;
-            let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}")).await;
+            let grc =
+                gate_reported(ws, &reporter, &format!("verify gate · iter {n}"), None).await;
             let gate_state = if grc == 0 { "pass" } else { "fail" };
             let open = state::open_count(&bk)?;
             let failed = state::failed_count(&bk)?;
@@ -1238,9 +1274,9 @@ mod tests {
         );
         std::fs::write(ws.join(".agentloop/state/last_gate.txt"), &huge).unwrap();
 
-        let note = gate_failure_feedback(&ws);
+        let note = gate_failure_feedback(&ws, "task-1");
 
-        assert!(note.starts_with("verify.sh failed; redesign required"));
+        assert!(note.starts_with("verify gate failed for task-1"));
         assert!(
             note.len() <= 16 * 1024,
             "note must stay bounded, got {} bytes",
@@ -1280,6 +1316,50 @@ mod tests {
     }
 
     #[test]
+    fn gate_passes_scope_to_verify_sh_as_arg1() {
+        let ws = tmp_ws("orch-gate-scope");
+        std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
+        // The per-task acceptance gate is scoped: verify.sh receives the task id
+        // as $1 so one task's flaky verifier can no longer fail (and redesign)
+        // an unrelated task. The no-arg run stays the global DONE gate.
+        std::fs::write(
+            ws.join(".agentloop/verify.sh"),
+            "#!/bin/bash\necho \"scope=${1:-GLOBAL}\"\nexit 0\n",
+        )
+        .unwrap();
+
+        assert_eq!(gate(&ws, Some("task-7")), 0);
+        let scoped = std::fs::read_to_string(ws.join(".agentloop/state/last_gate.txt")).unwrap();
+        assert!(scoped.contains("scope=task-7"), "got: {scoped}");
+
+        assert_eq!(gate(&ws, None), 0);
+        let global = std::fs::read_to_string(ws.join(".agentloop/state/last_gate.txt")).unwrap();
+        assert!(global.contains("scope=GLOBAL"), "got: {global}");
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn gate_failure_feedback_blames_the_scoped_task_and_demands_product_fixes() {
+        let ws = tmp_ws("orch-feedback-scope");
+        std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
+        std::fs::write(ws.join(".agentloop/state/last_gate.txt"), "assertion failed").unwrap();
+
+        let note = gate_failure_feedback(&ws, "task-7");
+
+        assert!(note.contains("task-7"), "feedback names the gated task");
+        assert!(
+            note.contains("fix the product behavior"),
+            "feedback steers the redesign toward the feature, got: {note}"
+        );
+        assert!(
+            note.contains("do not build verification tooling"),
+            "feedback forbids gate-repair plans, got: {note}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
     fn gate_times_out_and_kills_a_hung_verify_sh() {
         let ws = tmp_ws("orch-gate-timeout");
         std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
@@ -1289,7 +1369,7 @@ mod tests {
         std::env::set_var("AGENTLOOP_GATE_TIMEOUT_SECS", "1");
 
         let start = std::time::Instant::now();
-        let rc = gate(&ws);
+        let rc = gate(&ws, None);
         std::env::remove_var("AGENTLOOP_GATE_TIMEOUT_SECS");
 
         assert_eq!(rc, 124, "timeout reported like timeout(1)");
@@ -1392,9 +1472,9 @@ mod tests {
         let ws = tmp_ws("orch-gatelog");
         std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
 
-        assert_eq!(gate(&ws), 1); // no verify.sh yet
+        assert_eq!(gate(&ws, None), 1); // no verify.sh yet
         std::fs::write(ws.join(".agentloop/verify.sh"), "#!/bin/bash\nexit 0\n").unwrap();
-        assert_eq!(gate(&ws), 0);
+        assert_eq!(gate(&ws, None), 0);
 
         let log = std::fs::read_to_string(ws.join(".agentloop/logs/gate.log")).unwrap();
         assert_eq!(log.matches("=== ").count(), 2, "both runs recorded");

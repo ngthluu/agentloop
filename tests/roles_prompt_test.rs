@@ -24,7 +24,9 @@ fn manager_prompt_is_business_only() {
     let p = manager::manager_prompt(&ws, 3);
 
     assert!(p.contains("You are the MANAGER"));
-    assert!(p.contains("business tasks only"));
+    // The manager owns the business backlog plus the verify gate — but never
+    // the technical layer (designs, builder plans, role routing).
+    assert!(p.contains("business tasks and the verify gate"));
     assert!(p.contains("backlog.json"));
     assert!(p.contains("master.md"));
     assert!(!p.contains("design.md"));

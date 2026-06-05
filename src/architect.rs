@@ -20,7 +20,7 @@ pub fn architect_prompt(ws: &Path, task: &Value) -> String {
         String::new()
     } else {
         format!(
-            "\n\nA PREVIOUS ATTEMPT AT THIS TASK WAS REJECTED. Your earlier plan did not satisfy the gate or the customer. Produce a DIFFERENT plan that directly addresses this feedback:\n{feedback}\n"
+            "\n\nA PREVIOUS ATTEMPT AT THIS TASK WAS REJECTED. The FEATURE failed its gate or customer review — fix the product behavior. Produce a DIFFERENT technical plan whose builders change product code until the acceptance criteria are actually true. Do NOT respond with verification tooling, evidence gathering, or gate changes. Feedback:\n{feedback}\n"
         )
     };
     format!(
@@ -33,15 +33,29 @@ BUSINESS TASK:
   acceptance criteria: {acc}{feedback_block}
 
 Your job:
-1. Inspect the application and decide the technical plan for this one business task.
-2. Write {task_dir}/design.md with the implementation approach, files/components likely involved, constraints, and verification notes.
-3. Write {task_dir}/builders.json with builder-sized implementation items.
-4. Give every builder item a globally unique id prefixed with this task id, such as {id}-b1, {id}-b2.
+1. Inspect the application and design the complete technical solution for this one business task.
+2. Write {task_dir}/design.md — a comprehensive technical spec covering the WHOLE business task:
+   architecture, data flow, files/components, contracts between the pieces, edge cases, and which
+   tests in the project's normal test suite will prove the acceptance criteria.
+3. Write {task_dir}/builders.json with as FEW implementation items as possible — ideally ONE.
+   Sizing rule: each item is the LARGEST coherent chunk of this task that one builder can
+   implement in a single session without exhausting its context window. Builders ALWAYS
+   delegate exploration and implementation to sub-agents, keeping only the plan, dispatches,
+   and diff reviews in their own context — so size items like a whole feature or subsystem,
+   never like a function or a file. Split into multiple items only when a single builder
+   genuinely could not deliver the whole thing in one session.
+4. Each item is a vertical slice: real product code, usually across multiple files, together
+   with its tests in the project's normal test suite. Never plan micro-items; if an item
+   would not change product behavior, it does not belong in the plan.
+5. NEVER plan an item whose deliverable is verification tooling: no gate scripts, no standalone
+   verify/audit/proof runners, no evidence or acceptance documents. Verification lives in the
+   project's normal test suite and is written by the same builder as the feature code.
+6. Give every builder item a globally unique id prefixed with this task id, such as {id}-b1, {id}-b2.
 
 OUTPUT CONTRACT — you MUST write valid files:
 - {task_dir}/design.md must be non-empty.
 - {task_dir}/builders.json must be valid JSON shaped like:
-  {{"items":[{{"id":"{id}-b1","title":"Implement one focused slice","desc":"Specific implementation work","deps":[],"status":"ready","attempts":0,"acceptance":"How to verify this slice"}}]}}
+  {{"items":[{{"id":"{id}-b1","title":"One substantial vertical slice","desc":"Feature code plus its tests","deps":[],"status":"ready","attempts":0,"acceptance":"User-observable behavior this slice makes true"}}]}}
 
 Do not edit application source code. Do not implement the task. Do not write global backlog files."#,
         ws = ws.display(),
@@ -228,6 +242,41 @@ mod tests {
         );
 
         assert!(!architect_output_valid(&ws, &task));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn architect_prompt_demands_substantial_slices_and_forbids_verifier_items() {
+        let ws = tmp_ws("archsize");
+        let task = json!({"id":"task-1","title":"Login","desc":"Let users log in","acceptance":"user can log in"});
+
+        let p = architect_prompt(&ws, &task);
+        // Big spec covering the whole business task, maximal builder items.
+        assert!(p.contains("comprehensive technical spec"));
+        assert!(p.contains("vertical slice"));
+        // Items are sized by one-builder-with-sub-agents capacity: as big as
+        // possible without exhausting a single builder session's context window.
+        assert!(p.contains("as FEW implementation items as possible"));
+        assert!(p.contains("context window"));
+        assert!(p.contains("sub-agents"));
+        // Verification tooling must never be a builder deliverable: in a real run
+        // 80% of all builder items became gate scripts / proof docs / runners.
+        assert!(p.contains("NEVER plan an item whose deliverable is verification tooling"));
+        assert!(p.contains("project's normal test suite"));
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn architect_redesign_feedback_steers_at_the_feature_not_the_gate() {
+        let ws = tmp_ws("archsteer");
+        let task = json!({"id":"task-1","title":"Login","desc":"Let users log in","acceptance":"user can log in"});
+        crate::task_state::bump_redesign(&ws, "task-1", "verify gate failed for task-1").unwrap();
+
+        let p = architect_prompt(&ws, &task);
+        assert!(p.contains("fix the product behavior"));
+        assert!(p.contains("Do NOT respond with verification tooling"));
+
         let _ = std::fs::remove_dir_all(&ws);
     }
 
