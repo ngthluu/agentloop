@@ -722,20 +722,23 @@ fn render_model_config(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layo
     ))];
     for (i, row) in s.model_rows().iter().enumerate() {
         let cell = |col: usize, value: &str| -> Span<'static> {
-            // The selected cell is highlighted; an in-progress edit shows the
-            // buffer with a cursor mark instead of the stored value.
-            let editing = i == sel_row && col == sel_col && s.model_edit_buffer().is_some();
-            let text = if editing {
-                format!("{}▏", s.model_edit_buffer().unwrap_or(""))
-            } else if value.is_empty() {
-                "(default)".to_string()
-            } else {
-                value.to_string()
-            };
             let width = match col {
                 0 => 10,
                 1 => 24,
                 _ => 10,
+            };
+            // The selected cell is highlighted; an in-progress edit shows the
+            // buffer with a cursor mark instead of the stored value. Text is
+            // clipped to the cell so a long value can't shove the next column.
+            let editing = i == sel_row && col == sel_col && s.model_edit_buffer().is_some();
+            let text = if editing {
+                let buf = s.model_edit_buffer().unwrap_or("");
+                let shown: String = buf.chars().take(width - 1).collect();
+                format!("{shown}▏")
+            } else if value.is_empty() {
+                "(default)".to_string()
+            } else {
+                value.chars().take(width).collect()
             };
             let padded = format!("{text:<width$}");
             if i == sel_row && col == sel_col {
@@ -764,7 +767,7 @@ fn render_model_config(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layo
     }
     let panel = Paragraph::new(lines).block(
         Block::default()
-            .title(" Model routing — saved to config.json ")
+            .title(" Model routing \u{2014} saved to config.json ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow)),
     );

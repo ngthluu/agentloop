@@ -234,3 +234,21 @@ fn footer_hints_advertise_ctrl_o() {
         "list footer advertises the model picker"
     );
 }
+
+#[test]
+fn model_config_edit_shows_buffer_with_cursor_mark() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut s = routed("");
+    s.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    s.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)); // model column
+    s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // edit "opus"
+
+    let backend = TestBackend::new(100, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+
+    assert!(
+        find(&term, "opus▏").is_some(),
+        "edit buffer + cursor mark rendered in the selected cell"
+    );
+}
