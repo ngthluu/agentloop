@@ -105,6 +105,11 @@ with an error instead of corrupting shared state.
   The available roles are `manager`, `architect`, `builder`, `customer`, and
   `resolver`. Tool permission switches are fixed by agentloop: `claude` always gets
   `--dangerously-skip-permissions`, and `codex` always gets `--yolo`.
+  An omitted `model`/`effort` leaves the choice to the tool itself — the default
+  config pins no codex model, because codex model slugs churn (`gpt-5` no longer
+  exists). Press `ctrl-o` in the TUI to pick and persist tool/model/effort per
+  role: edits are written back to the config file immediately and apply to the
+  running loop from its next dispatch.
 - **Gate and customer:** `.agentloop/verify.sh` still gates software behavior, so
   agentloop can target any kind of software. After the gate passes for a business
   task, the customer approves or rejects that task by its acceptance criteria.
