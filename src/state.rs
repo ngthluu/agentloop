@@ -8,17 +8,56 @@ pub fn read(path: &Path) -> Result<Value> {
     serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
 }
 
-/// Atomic write: temp file in the same dir, then rename.
-fn write_atomic(path: &Path, v: &Value) -> Result<()> {
+/// Atomic, durable write: temp file in the same dir, fsync, then rename. The
+/// fsync matters: without it a crash/power loss can persist the rename before
+/// the data blocks, leaving a present-but-empty backlog.json — the worst state
+/// file to tear. The temp name carries a per-process counter so concurrent
+/// writers inside one process never collide on the temp path.
+pub(crate) fn write_atomic(path: &Path, v: &Value) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = dir.join(format!(".state.{}.tmp", std::process::id()));
+    let tmp = dir.join(format!(
+        ".state.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, serde_json::to_vec_pretty(v)?)?;
+    if let Ok(f) = std::fs::File::open(&tmp) {
+        let _ = f.sync_all();
+    }
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
+/// Whether `id` is safe to use as a git refname component and a filesystem path
+/// segment. Task/builder ids are LLM-generated; without this check an id like
+/// `../../escape` becomes a path-traversal write and `b ad~id` an invalid git ref.
+pub fn safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 100
+        && !id.starts_with(['-', '.'])
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 pub fn backlog_valid(path: &Path) -> bool {
-    matches!(read(path), Ok(v) if v.get("items").map(|i| i.is_array()).unwrap_or(false))
+    let Ok(v) = read(path) else {
+        return false;
+    };
+    let Some(items) = v.get("items").and_then(|i| i.as_array()) else {
+        return false;
+    };
+    // Every item's id must be present and safe: ids become git branch names and
+    // filesystem paths, so an invalid id here would poison dispatch later.
+    items.iter().all(|it| {
+        it.get("id")
+            .and_then(|i| i.as_str())
+            .map(safe_id)
+            .unwrap_or(false)
+    })
 }
 
 /// Ids that should be dispatched this round: items whose deps are all `done` and
@@ -64,6 +103,10 @@ pub fn ready_items(path: &Path, ws: &Path, max_parallel: usize) -> Result<Vec<St
     Ok(out)
 }
 
+/// Items that still hold the run open: anything not terminally `done` or
+/// `failed`. Counting by exclusion is deliberate — an unknown status written by
+/// a confused manager (or a newer binary's state) must keep the loop alive and
+/// get surfaced, not silently vanish from accounting and produce a false DONE.
 pub fn open_count(path: &Path) -> Result<i64> {
     let v = read(path)?;
     let empty = vec![];
@@ -71,12 +114,7 @@ pub fn open_count(path: &Path) -> Result<i64> {
         .as_array()
         .unwrap_or(&empty)
         .iter()
-        .filter(|i| {
-            matches!(
-                i["status"].as_str(),
-                Some("ready") | Some("in_progress") | Some("blocked")
-            )
-        })
+        .filter(|i| !matches!(i["status"].as_str(), Some("done") | Some("failed")))
         .count();
     Ok(n as i64)
 }
@@ -132,7 +170,11 @@ pub fn progress_fingerprint(bk: &Path, ws: &Path) -> String {
             let Ok(v) = serde_json::from_str::<Value>(&text) else {
                 continue;
             };
-            let task = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let task = dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             for it in v["items"].as_array().unwrap_or(&empty) {
                 parts.push(format!(
                     "{task}/{}={}:{}",
@@ -224,6 +266,53 @@ pub fn strip_unknown_deps(path: &Path) -> Result<Vec<(String, String)>> {
         write_atomic(path, &v)?;
     }
     Ok(removed)
+}
+
+/// Clamp any item `notes` longer than `max_bytes`. Self-heal for a backlog
+/// poisoned by a pre-cap run (or any future unbounded write): oversized notes
+/// are inlined into manager/architect prompts and push the spawn argv past
+/// ARG_MAX (E2BIG) on every dispatch — a crash loop, since backlog.json
+/// persists across runs. Returns the ids whose notes were clamped.
+pub fn clamp_oversized_notes(path: &Path, max_bytes: usize) -> Result<Vec<String>> {
+    let mut v = read(path)?;
+    let mut clamped = Vec::new();
+    if let Some(items) = v["items"].as_array_mut() {
+        for it in items.iter_mut() {
+            let Some(notes) = it["notes"].as_str() else {
+                continue;
+            };
+            if notes.len() > max_bytes {
+                let id = it["id"].as_str().unwrap_or("?").to_string();
+                it["notes"] = json!(crate::limits::clamp_str(notes, max_bytes));
+                clamped.push(id);
+            }
+        }
+    }
+    if !clamped.is_empty() {
+        write_atomic(path, &v)?;
+    }
+    Ok(clamped)
+}
+
+/// Lines describing every `failed` item (id, title, note head), or "" when there
+/// are none. Failed items hold the run open (`loop_done` requires failed == 0)
+/// but are not dispatchable, so the manager MUST see all of them — a failed leaf
+/// task with no dependents would otherwise never be surfaced and the run could
+/// never finish.
+pub fn failed_items_report(path: &Path) -> Result<String> {
+    let v = read(path)?;
+    let empty = vec![];
+    let mut out = String::new();
+    for it in v["items"].as_array().unwrap_or(&empty) {
+        if it["status"] != "failed" {
+            continue;
+        }
+        let id = it["id"].as_str().unwrap_or("?");
+        let title = it["title"].as_str().unwrap_or("");
+        let note = crate::limits::clamp_str(it["notes"].as_str().unwrap_or(""), 512);
+        out.push_str(&format!("  - {id} ({title}): {note}\n"));
+    }
+    Ok(out)
 }
 
 /// Lines describing open items that depend on `failed` items (they can never run

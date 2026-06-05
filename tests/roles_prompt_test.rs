@@ -170,3 +170,25 @@ fn manager_prompt_reports_items_stuck_on_failed_deps() {
     assert!(p.contains("task-2 depends on failed task-1"));
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn manager_prompt_surfaces_failed_leaf_tasks() {
+    // A failed task with NO dependents holds the run open (DONE requires zero
+    // failed) but is not dispatchable; if the manager never hears about it the
+    // run can never finish. Every failed item must reach the prompt.
+    let ws = tmp_ws("almgrfailed");
+    let sdir = ws.join(".agentloop/state");
+    std::fs::create_dir_all(&sdir).unwrap();
+    std::fs::write(
+        sdir.join("backlog.json"),
+        r#"{"items":[{"id":"task-9","title":"orphan","desc":"d","deps":[],"status":"failed","attempts":3,"acceptance":"a","notes":"redesign cap (3) reached"}]}"#,
+    )
+    .unwrap();
+
+    let p = manager::manager_prompt(&ws, 3);
+
+    assert!(p.contains("FAILED ITEMS"), "failed section present");
+    assert!(p.contains("task-9"), "failed leaf id listed");
+    assert!(p.contains("redesign cap (3) reached"), "failure note shown");
+    let _ = std::fs::remove_dir_all(&ws);
+}

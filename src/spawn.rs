@@ -12,11 +12,11 @@ use crate::config::Config;
 /// agents orphaned (burning credits). Each agent is its own process group.
 static ACTIVE_PGIDS: LazyLock<Mutex<HashSet<i32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
-fn register_pgid(pgid: i32) {
+pub(crate) fn register_pgid(pgid: i32) {
     ACTIVE_PGIDS.lock().unwrap().insert(pgid);
 }
 
-fn unregister_pgid(pgid: i32) {
+pub(crate) fn unregister_pgid(pgid: i32) {
     ACTIVE_PGIDS.lock().unwrap().remove(&pgid);
 }
 
@@ -63,12 +63,22 @@ pub fn kill_all_agents() {
     }
 }
 
+/// Hard cap on the prompt argv element. Linux limits a SINGLE argv string to
+/// MAX_ARG_STRLEN (≈128KB) regardless of total ARG_MAX, and macOS caps total
+/// argv+env at ~1MB — an oversized prompt dies at exec with E2BIG. Every
+/// feedback string is individually capped upstream, but the assembled prompt
+/// (goal + master + backlog + design + Q&A) is the sum of many parts, so this
+/// is the final chokepoint: clamp the middle (instructions live at both ends).
+const PROMPT_ARG_MAX_BYTES: usize = 120 * 1024;
+
 /// Build the real claude/codex argv for a role (prompt included), mirroring lib/spawn.sh.
 pub fn build_argv(cfg: &Config, role: &str, prompt: &str) -> Result<Vec<String>> {
     let rrole = cfg.resolve_role(role).context("no resolvable role")?;
     let tool = cfg.role_field(&rrole, "tool").context("role has no tool")?;
     let model = cfg.role_field(&rrole, "model");
     let effort = cfg.role_field(&rrole, "effort");
+    let prompt = crate::limits::clamp_middle(prompt, PROMPT_ARG_MAX_BYTES);
+    let prompt = prompt.as_str();
 
     let mut argv: Vec<String> = Vec::new();
     match tool.as_str() {
@@ -221,6 +231,8 @@ pub async fn run_with_timeout(
     use nix::sys::signal::{killpg, Signal};
     use nix::unistd::Pid;
 
+    let (head, tail) = argv.split_first().context("run_with_timeout: empty argv")?;
+
     // Append so usage-limit retries and re-prompts that reuse one log path keep
     // the earlier attempt's output (the TUI tails this file live).
     let file = std::fs::OpenOptions::new()
@@ -229,8 +241,8 @@ pub async fn run_with_timeout(
         .open(log)
         .with_context(|| format!("create log {}", log.display()))?;
 
-    let mut cmd = tokio::process::Command::new(&argv[0]);
-    cmd.args(&argv[1..]).current_dir(cwd);
+    let mut cmd = tokio::process::Command::new(head);
+    cmd.args(tail).current_dir(cwd);
 
     // Background tasks draining the child's piped output into the log (streaming mode).
     let mut pumps: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -295,8 +307,17 @@ pub async fn run_with_timeout(
     // unregistered (a leaked registry entry would make kill_all_agents target a
     // pid that may have been reused).
     let outcome = match tokio::time::timeout(t, child.wait()).await {
-        Ok(Ok(status)) => status.code().unwrap_or(-1),
-        Ok(Err(_io_err)) => -1,
+        Ok(Ok(status)) => status.code().unwrap_or_else(|| {
+            // Signal death (OOM kill, external kill, our own group kill) is not
+            // the same as "exited -1": report it shell-style as 128+signo so
+            // retry/limit logic and the logs can tell the two apart.
+            use std::os::unix::process::ExitStatusExt;
+            status.signal().map(|s| 128 + s).unwrap_or(-1)
+        }),
+        Ok(Err(io_err)) => {
+            eprintln!("agent wait failed: {io_err}");
+            -1
+        }
         Err(_elapsed) => {
             if let Some(pg) = pgid {
                 let _ = killpg(pg, Signal::SIGTERM);
@@ -311,8 +332,16 @@ pub async fn run_with_timeout(
         unregister_pgid(p);
     }
     // Drain remaining piped output and flush it to the log before returning.
-    for pump in pumps {
-        let _ = pump.await;
+    // Bounded: a grandchild that escaped the process group and kept the pipe
+    // write-end open would otherwise hold next_line() at EOF forever, hanging
+    // the supposedly-bounded timeout path.
+    for mut pump in pumps {
+        if tokio::time::timeout(Duration::from_secs(5), &mut pump)
+            .await
+            .is_err()
+        {
+            pump.abort();
+        }
     }
     Ok(outcome)
 }

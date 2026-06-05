@@ -89,7 +89,13 @@ fn report_lists_bounced_failed_events_and_current_failures() {
     let st = ws.join(".agentloop/state");
     std::fs::create_dir_all(st.join("tasks/task-9")).unwrap();
 
-    history::record(&ws, "status", "task-1-b1", "bounced", "needs_input: auto-answered");
+    history::record(
+        &ws,
+        "status",
+        "task-1-b1",
+        "bounced",
+        "needs_input: auto-answered",
+    );
     history::record(&ws, "status", "task-9-b2", "failed", "did not report done");
     history::record(&ws, "task", "task-9", "failed", "redesign cap (3) reached");
 

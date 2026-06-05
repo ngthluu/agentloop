@@ -65,7 +65,9 @@ pub fn report(ws: &Path) -> String {
     let events = read_events(ws);
     out.push_str(&format!("=== agentloop report — {} ===\n", ws.display()));
     if events.is_empty() {
-        out.push_str("(no events recorded yet — events.jsonl is written by runs from this version on)\n");
+        out.push_str(
+            "(no events recorded yet — events.jsonl is written by runs from this version on)\n",
+        );
     }
 
     let pick = |status: &str| -> Vec<&Value> {
@@ -124,7 +126,12 @@ pub fn report(ws: &Path) -> String {
                 "  {}  {}\n    note: {}\n",
                 i["id"].as_str().unwrap_or(""),
                 i["title"].as_str().unwrap_or(""),
-                i["notes"].as_str().unwrap_or("").lines().next().unwrap_or("")
+                i["notes"]
+                    .as_str()
+                    .unwrap_or("")
+                    .lines()
+                    .next()
+                    .unwrap_or("")
             ));
         }
     }
@@ -151,7 +158,12 @@ pub fn report(ws: &Path) -> String {
                         task_id,
                         i["id"].as_str().unwrap_or(""),
                         i["attempts"].as_u64().unwrap_or(0),
-                        i["notes"].as_str().unwrap_or("").lines().next().unwrap_or("")
+                        i["notes"]
+                            .as_str()
+                            .unwrap_or("")
+                            .lines()
+                            .next()
+                            .unwrap_or("")
                     ));
                 }
             }
@@ -183,10 +195,12 @@ pub fn archive_file(path: &Path, dir: &Path) -> Result<()> {
         dest = dir.join(format!("{stamp}-{n}-{name}"));
         n += 1;
     }
-    std::fs::rename(path, &dest).or_else(|_| {
-        std::fs::copy(path, &dest)
-            .map(|_| ())
-            .and_then(|_| std::fs::remove_file(path))
-    }).with_context(|| format!("archive {} -> {}", path.display(), dest.display()))?;
+    std::fs::rename(path, &dest)
+        .or_else(|_| {
+            std::fs::copy(path, &dest)
+                .map(|_| ())
+                .and_then(|_| std::fs::remove_file(path))
+        })
+        .with_context(|| format!("archive {} -> {}", path.display(), dest.display()))?;
     Ok(())
 }

@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,9 +21,12 @@ struct Args {
     /// config.json path (default: global agentloop config.json)
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Wipe existing .agentloop state and start over
+    /// Wipe existing .agentloop state and start over (prompts for confirmation)
     #[arg(long)]
     fresh: bool,
+    /// Skip confirmation prompts (required for --fresh in non-interactive runs)
+    #[arg(long)]
+    yes: bool,
     /// Override caps.max_iterations
     #[arg(long)]
     max_iterations: Option<u32>,
@@ -48,6 +51,76 @@ fn git(repo: &Path, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+/// Trimmed stdout of a successful git invocation, None on any failure.
+fn git_stdout(repo: &Path, args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Expand a leading `~` to $HOME. A literal `~` arriving here (quoted on the
+/// shell, or from a script/config) would otherwise silently create and use a
+/// directory literally named "~" under the cwd.
+fn expand_tilde(p: PathBuf) -> PathBuf {
+    let Some(s) = p.to_str() else { return p };
+    if s == "~" {
+        if let Ok(h) = std::env::var("HOME") {
+            return PathBuf::from(h);
+        }
+    } else if let Some(rest) = s.strip_prefix("~/") {
+        if let Ok(h) = std::env::var("HOME") {
+            return PathBuf::from(h).join(rest);
+        }
+    }
+    p
+}
+
+/// Ask y/N on the controlling terminal. Returns false (refuse) when stdin is
+/// not a TTY — destructive actions in scripts must pass --yes explicitly.
+fn confirm_on_tty(prompt: &str) -> Result<bool> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+/// Hold an exclusive advisory lock on `.agentloop/state/.lock` for the life of
+/// the returned File. Two concurrent runs on one workspace would interleave
+/// read-modify-writes of backlog.json and silently lose each other's updates.
+fn acquire_workspace_lock(ws: &Path) -> Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let dir = ws.join(".agentloop/state");
+    std::fs::create_dir_all(&dir)?;
+    let lockfile = dir.join(".lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lockfile)?;
+    let rc = unsafe { nix::libc::flock(f.as_raw_fd(), nix::libc::LOCK_EX | nix::libc::LOCK_NB) };
+    if rc != 0 {
+        bail!(
+            "another agentloop run is already active on {} — stop it first (advisory lock: {})",
+            ws.display(),
+            lockfile.display()
+        );
+    }
+    Ok(f)
+}
+
 /// Create .agentloop scaffolding, init git, and seed state. Idempotent.
 pub fn bootstrap_workspace(ws: &Path, goal: &str) -> Result<()> {
     std::fs::create_dir_all(ws)?;
@@ -64,8 +137,18 @@ pub fn bootstrap_workspace(ws: &Path, goal: &str) -> Result<()> {
         std::fs::create_dir_all(meta.join(sub))?;
     }
 
-    if !ws.join(".git").exists() {
-        git(&ws, &["init", "-q"]);
+    // `rev-parse` rather than a `.git` path probe: a workspace that is a
+    // subdirectory of an existing repo must not get a surprise nested
+    // `git init`, and a bare repo (no working tree to merge into) is refused.
+    match git_stdout(&ws, &["rev-parse", "--is-inside-work-tree"]).as_deref() {
+        Some("true") => {}
+        Some(_) => bail!(
+            "{} is a bare git repository; agentloop needs a working tree",
+            ws.display()
+        ),
+        None => {
+            git(&ws, &["init", "-q"]);
+        }
     }
     if !git(&ws, &["config", "user.email"]) {
         git(&ws, &["config", "user.email", "agentloop@local"]);
@@ -96,6 +179,25 @@ pub fn bootstrap_workspace(ws: &Path, goal: &str) -> Result<()> {
     let bk = meta.join("state/backlog.json");
     if !bk.exists() {
         std::fs::write(&bk, "{\"items\":[]}\n")?;
+    } else if !crate::state::backlog_valid(&bk) {
+        // A torn/corrupt backlog.json would otherwise error every restart — a
+        // crash loop in the file the whole run hinges on. Archive it for
+        // inspection (never delete) and reseed; the manager rebuilds the
+        // backlog from goal.md + master.md on the next round.
+        let dir = meta.join("state/archive");
+        let _ = crate::history::archive_file(&bk, &dir);
+        std::fs::write(&bk, "{\"items\":[]}\n")?;
+        crate::history::record(
+            &ws,
+            "state",
+            "backlog",
+            "repair",
+            "corrupt/invalid backlog.json archived and reseeded",
+        );
+        eprintln!(
+            "repaired corrupt backlog.json (previous file archived under {})",
+            dir.display()
+        );
     }
 
     Ok(())
@@ -154,27 +256,67 @@ pub fn resolve_goal_text(arg: Option<&str>, ws: &Path) -> String {
 pub async fn run() -> Result<()> {
     let started = std::time::Instant::now();
     let args = Args::parse();
-    let ws = args.workspace.clone().unwrap_or(std::env::current_dir()?);
+    let ws = expand_tilde(args.workspace.clone().unwrap_or(std::env::current_dir()?));
     if args.report {
         let ws = ws.canonicalize().unwrap_or(ws);
+        if !ws.join(".agentloop").exists() {
+            // An empty report on a typo'd path must not look like "no problems".
+            bail!("no agentloop workspace found at {}", ws.display());
+        }
         print!("{}", crate::history::report(&ws));
         return Ok(());
     }
-    if args.fresh {
-        let _ = std::fs::remove_dir_all(ws.join(".agentloop"));
-    }
 
     let goal_arg = args.goal.clone();
+    let mut preserved_goal = String::new();
+    if args.fresh {
+        // Canonicalize BEFORE deleting so the target shown/removed is the real
+        // path, and never delete without explicit consent: .agentloop holds the
+        // backlog, goal history, events, and results of every prior run.
+        let target = ws
+            .canonicalize()
+            .unwrap_or_else(|_| ws.clone())
+            .join(".agentloop");
+        if target.exists() {
+            if !args.yes {
+                let prompt = format!(
+                    "--fresh will permanently delete {} (all run state, logs, and results). Continue? [y/N] ",
+                    target.display()
+                );
+                if !confirm_on_tty(&prompt)? {
+                    bail!("aborted: --fresh not confirmed (pass --yes to skip the prompt)");
+                }
+            }
+            // --fresh with no new goal means "restart the same goal from
+            // scratch", not "silently forget the goal" — keep it across the wipe.
+            preserved_goal =
+                std::fs::read_to_string(target.join("state/goal.md")).unwrap_or_default();
+            std::fs::remove_dir_all(&target)
+                .with_context(|| format!("delete {}", target.display()))?;
+            eprintln!("removed {}", target.display());
+        }
+    }
+
     let cfg_path = if let Some(path) = args.config.as_deref() {
+        let path = expand_tilde(path.to_path_buf());
         if !path.exists() {
             bail!("config path does not exist: {}", path.display());
         }
-        path.to_path_buf()
+        path
     } else {
         Config::ensure_default_config(&Config::default_config_path())?
     };
     bootstrap_workspace(&ws, goal_arg.as_deref().unwrap_or(""))?;
     let ws = ws.canonicalize().unwrap_or(ws);
+    if args.fresh
+        && !preserved_goal.trim().is_empty()
+        && goal_arg
+            .as_deref()
+            .map(|g| g.trim().is_empty())
+            .unwrap_or(true)
+    {
+        std::fs::write(ws.join(".agentloop/state/goal.md"), &preserved_goal)?;
+    }
     if !args.fresh {
         if let Some(g) = goal_arg.as_deref() {
             if !g.trim().is_empty() {
@@ -183,6 +325,10 @@ pub async fn run() -> Result<()> {
         }
     }
     let goal_text = resolve_goal_text(goal_arg.as_deref(), &ws);
+
+    // Exclusive per-workspace lock, held for the rest of the process: a second
+    // concurrent run would corrupt shared state. Dropped implicitly at exit.
+    let _ws_lock = acquire_workspace_lock(&ws)?;
 
     let mut cfg = Config::load(&cfg_path)?;
     if let Some(m) = args.max_iterations {

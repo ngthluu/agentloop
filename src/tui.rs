@@ -413,8 +413,8 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         "  │  iter {}  │  gate: {}  │  open: {}  │  ⏱ {}",
         s.iter, s.gate, s.open, total
     );
-    let avail = (chunks[0].width as usize)
-        .saturating_sub(prefix.chars().count() + suffix.chars().count());
+    let avail =
+        (chunks[0].width as usize).saturating_sub(prefix.chars().count() + suffix.chars().count());
     let goal = ellipsize(&s.goal.replace('\n', " "), avail);
     let status_text = format!("{prefix}{goal}{suffix}");
     let status_bar = Paragraph::new(status_text).style(

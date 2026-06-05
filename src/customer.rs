@@ -59,11 +59,14 @@ pub async fn customer_run(
         // Archive (never delete) the previous round's review before re-running.
         let dir = crate::task_state::task_dir(ws, id).join("archive");
         let _ = crate::history::archive_file(
-            &ws.join(".agentloop/state/tasks").join(id).join("customer.json"),
+            &ws.join(".agentloop/state/tasks")
+                .join(id)
+                .join("customer.json"),
             &dir,
         );
         let _ = crate::history::archive_file(
-            &ws.join(".agentloop/results").join(format!("{id}-customer.json")),
+            &ws.join(".agentloop/results")
+                .join(format!("{id}-customer.json")),
             &dir,
         );
     }

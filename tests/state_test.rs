@@ -13,11 +13,16 @@ fn tmp_backlog(body: &str) -> PathBuf {
         .unwrap();
     p
 }
-fn rand_suffix() -> u128 {
-    std::time::SystemTime::now()
+fn rand_suffix() -> String {
+    // Nanos alone collide when parallel tests call this in the same tick; the
+    // per-process counter makes every suffix unique.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
+        .as_nanos();
+    format!("{nanos}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Build a real workspace layout (.agentloop/state/backlog.json) so question files
@@ -262,4 +267,87 @@ fn progress_fingerprint_tracks_semantic_changes_only() {
         after_status,
         "builder attempts change counts as progress"
     );
+}
+
+#[test]
+fn safe_id_rejects_traversal_and_git_illegal_ids() {
+    // Ids become git branch names and filesystem path segments.
+    for bad in [
+        "",
+        "../../escape",
+        "a..b",
+        "-leading-dash",
+        ".leading-dot",
+        "has space",
+        "has/slash",
+        "tilde~1",
+        "colon:x",
+        "q?mark",
+        &"x".repeat(101),
+    ] {
+        assert!(!state::safe_id(bad), "must reject {bad:?}");
+    }
+    for good in ["task-1", "task-1-b2", "Item_3.fix", "a"] {
+        assert!(state::safe_id(good), "must accept {good:?}");
+    }
+}
+
+#[test]
+fn backlog_valid_rejects_unsafe_or_missing_ids() {
+    let p = tmp_backlog(r#"{"items":[{"id":"../../etc","status":"ready","deps":[]}]}"#);
+    assert!(!state::backlog_valid(&p), "traversal id rejected");
+    let p = tmp_backlog(r#"{"items":[{"status":"ready","deps":[]}]}"#);
+    assert!(!state::backlog_valid(&p), "missing id rejected");
+}
+
+#[test]
+fn open_count_treats_unknown_statuses_as_open() {
+    // An unknown status (confused manager, newer binary's state) must hold the
+    // run open and get surfaced — not silently vanish and produce a false DONE.
+    let p = tmp_backlog(
+        r#"{"items":[
+        {"id":"it-1","status":"done","deps":[]},
+        {"id":"it-2","status":"failed","deps":[]},
+        {"id":"it-3","status":"deferred","deps":[]}
+    ]}"#,
+    );
+    assert_eq!(state::open_count(&p).unwrap(), 1);
+}
+
+#[test]
+fn clamp_oversized_notes_self_heals_poisoned_backlog() {
+    let huge = "x".repeat(100_000);
+    let p = tmp_backlog(&format!(
+        r#"{{"items":[
+        {{"id":"it-1","status":"ready","deps":[],"notes":"{huge}"}},
+        {{"id":"it-2","status":"ready","deps":[],"notes":"small"}}
+    ]}}"#
+    ));
+    let clamped = state::clamp_oversized_notes(&p, 16 * 1024).unwrap();
+    assert_eq!(clamped, vec!["it-1".to_string()]);
+    let v = state::read(&p).unwrap();
+    let n1 = state::item(&v, "it-1").unwrap()["notes"].as_str().unwrap();
+    assert!(n1.len() < 17 * 1024, "clamped, got {} bytes", n1.len());
+    assert!(n1.contains("[truncated"));
+    assert_eq!(state::item(&v, "it-2").unwrap()["notes"], "small");
+    // Idempotent: a second pass touches nothing.
+    assert!(state::clamp_oversized_notes(&p, 16 * 1024)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn failed_items_report_lists_failed_leaves_too() {
+    // A failed task with no dependents must still be surfaced to the manager:
+    // it holds the run open (DONE requires zero failed) but is not dispatchable.
+    let p = tmp_backlog(
+        r#"{"items":[
+        {"id":"task-1","title":"leaf","desc":"d","deps":[],"status":"failed","attempts":3,"notes":"redesign cap reached"},
+        {"id":"task-2","title":"ok","desc":"d","deps":[],"status":"ready","attempts":0}
+    ]}"#,
+    );
+    let report = state::failed_items_report(&p).unwrap();
+    assert!(report.contains("task-1"), "failed leaf surfaced: {report}");
+    assert!(report.contains("redesign cap reached"));
+    assert!(!report.contains("task-2"));
 }

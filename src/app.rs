@@ -112,7 +112,26 @@ fn install_tui_signal_handler() {
     });
 }
 
+/// Restore the terminal on panic. Without this, any panic while the TUI is up
+/// (raw mode + alternate screen) unwinds past `restore_terminal` and dumps the
+/// user into a broken shell — no echo, no line discipline — until `reset`.
+/// Chained in front of the default hook so the panic message still prints,
+/// now onto a usable screen.
+fn install_panic_terminal_restore() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            std::io::stdout(),
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
+        default_hook(info);
+    }));
+}
+
 pub async fn run_tui(cfg: Config, ws: PathBuf, goal: String) -> Result<i32> {
+    install_panic_terminal_restore();
     #[cfg(unix)]
     install_tui_signal_handler();
 

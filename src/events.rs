@@ -78,7 +78,9 @@ pub enum Event {
         gate: String,
         open: i64,
     },
-    EnteredStandby { reason: String },
+    EnteredStandby {
+        reason: String,
+    },
     Shutdown,
 }
 

@@ -20,6 +20,18 @@ pub fn manager_prompt(ws: &Path, max_attempts: u32) -> String {
             )
         })
         .unwrap_or_default();
+    // EVERY failed item must be surfaced, dependents or not: failed items hold
+    // the run open (DONE requires zero failed) but are not dispatchable, so a
+    // failed leaf task the manager never hears about would park the run forever.
+    let failed = state::failed_items_report(&st.join("backlog.json"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            format!(
+                "\n\nFAILED ITEMS — these hold the run open and will never be retried as-is. For each one, this round you MUST either reshape it into new smaller \"ready\" tasks or delete it from the backlog (record why in master.md):\n{s}"
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"You are the MANAGER for an autonomous app build. Working dir: {ws} (a git repo).
 You own business tasks only.
@@ -53,24 +65,30 @@ Completion ownership:
 OUTPUT CONTRACT — you MUST overwrite .agentloop/state/backlog.json with valid JSON:
 {{"items":[{{"id":"task-1","title":"User-visible outcome","desc":"What the user needs","deps":[],"status":"ready","attempts":0,"acceptance":"Observable acceptance criteria"}}]}}
 Also rewrite .agentloop/state/master.md as a human-readable status board.
-Do not print the JSON to stdout; write the files.{requests}{stuck}"#,
+Do not print the JSON to stdout; write the files.{requests}{stuck}{failed}"#,
         ws = ws.display(),
         goal = goal,
         master = master,
         backlog = backlog,
         max_attempts = max_attempts,
         requests = requests,
-        stuck = stuck
+        stuck = stuck,
+        failed = failed
     )
 }
 
 pub async fn manager_run(cfg: &Config, ws: &Path, log: &Path, t: Duration) -> Result<bool> {
     let bk = ws.join(".agentloop/state/backlog.json");
     let max_attempts = cfg.max_attempts();
+    // Snapshot BEFORE building the prompt: only requests that could have been
+    // in the prompt may be consumed afterwards. A request the user adds during
+    // the minutes-long agent run must stay pending for the next round, not be
+    // marked consumed without the manager ever seeing it.
+    let req_snapshot = crate::requests::count(ws).unwrap_or(0);
     let prompt = manager_prompt(ws, max_attempts);
     spawn::agent_run(cfg, "manager", &prompt, ws, log, t).await?;
     if state::backlog_valid(&bk) {
-        let _ = crate::requests::mark_all_consumed(ws);
+        let _ = crate::requests::mark_consumed_first(ws, req_snapshot);
         return Ok(true);
     }
 
@@ -81,7 +99,7 @@ pub async fn manager_run(cfg: &Config, ws: &Path, log: &Path, t: Duration) -> Re
     spawn::agent_run(cfg, "manager", &retry, ws, log, t).await?;
     let ok = state::backlog_valid(&bk);
     if ok {
-        let _ = crate::requests::mark_all_consumed(ws);
+        let _ = crate::requests::mark_consumed_first(ws, req_snapshot);
     }
     Ok(ok)
 }

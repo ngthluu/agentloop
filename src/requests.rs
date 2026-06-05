@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
@@ -8,6 +9,12 @@ pub struct Request {
     pub text: String,
     pub status: String, // "pending" | "consumed"
 }
+
+/// Serializes every read-modify-write of requests.jsonl. `append` (TUI add-task,
+/// goal folding) and `mark_consumed_first` (manager round) run concurrently on
+/// the same runtime; without the lock an interleaved read→write pair silently
+/// drops the other writer's request — lost user intent.
+static FILE_LOCK: Mutex<()> = Mutex::new(());
 
 fn path(ws: &Path) -> PathBuf {
     ws.join(".agentloop/state/requests.jsonl")
@@ -46,6 +53,7 @@ fn write_all(ws: &Path, reqs: &[Request]) -> Result<()> {
 }
 
 pub fn append(ws: &Path, text: &str) -> Result<()> {
+    let _guard = FILE_LOCK.lock().unwrap();
     let mut all = read_all(ws)?;
     all.push(Request {
         ts: chrono::Local::now().timestamp(),
@@ -56,6 +64,7 @@ pub fn append(ws: &Path, text: &str) -> Result<()> {
 }
 
 pub fn pending(ws: &Path) -> Result<Vec<String>> {
+    let _guard = FILE_LOCK.lock().unwrap();
     Ok(read_all(ws)?
         .into_iter()
         .filter(|r| r.status == "pending")
@@ -63,14 +72,31 @@ pub fn pending(ws: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-pub fn mark_all_consumed(ws: &Path) -> Result<()> {
+/// Total number of requests on file (pending + consumed). Snapshot this BEFORE
+/// building a manager prompt, then consume only that prefix afterwards.
+pub fn count(ws: &Path) -> Result<usize> {
+    let _guard = FILE_LOCK.lock().unwrap();
+    Ok(read_all(ws)?.len())
+}
+
+/// Mark the pending requests among the first `n` entries consumed. Appends only
+/// ever push to the end, so the first `n` are exactly the requests that could
+/// have been in a prompt built after a `count(ws) == n` snapshot — a request
+/// the user adds DURING the (minutes-long) manager run stays pending and is
+/// folded next round instead of being silently consumed unseen.
+pub fn mark_consumed_first(ws: &Path, n: usize) -> Result<()> {
+    let _guard = FILE_LOCK.lock().unwrap();
     let mut all = read_all(ws)?;
-    for r in all.iter_mut() {
+    for r in all.iter_mut().take(n) {
         if r.status == "pending" {
             r.status = "consumed".into();
         }
     }
     write_all(ws, &all)
+}
+
+pub fn mark_all_consumed(ws: &Path) -> Result<()> {
+    mark_consumed_first(ws, usize::MAX)
 }
 
 /// A manager-prompt section listing pending requests, or "" if none.

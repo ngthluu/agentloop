@@ -58,7 +58,10 @@ pub fn check_with_path(cfg: &Config, path_var: &str) -> Result<()> {
     }
     let mut msg = String::from("missing required agent CLI(s):\n");
     for (tool, roles) in &missing {
-        msg.push_str(&format!("  - {tool} (used by roles: {})\n", roles.join(", ")));
+        msg.push_str(&format!(
+            "  - {tool} (used by roles: {})\n",
+            roles.join(", ")
+        ));
     }
     msg.push_str("install them (or change the config routing):\n");
     for (tool, _) in &missing {

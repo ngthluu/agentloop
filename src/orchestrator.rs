@@ -111,11 +111,23 @@ async fn resolve_conflict(
     // Resolved iff no unmerged paths remain. If the agent resolved+staged but didn't
     // commit, finish the merge ourselves.
     if worktree::has_unmerged(ws) {
-        reporter.status(&rid, "failed", &tool, &model, "resolver left unmerged paths");
+        reporter.status(
+            &rid,
+            "failed",
+            &tool,
+            &model,
+            "resolver left unmerged paths",
+        );
         return Ok(false);
     }
     if worktree::merge_in_progress(ws) && !worktree::commit_merge(ws) {
-        reporter.status(&rid, "failed", &tool, &model, "resolver could not commit the merge");
+        reporter.status(
+            &rid,
+            "failed",
+            &tool,
+            &model,
+            "resolver could not commit the merge",
+        );
         return Ok(false);
     }
     // Guard against a resolver that aborted instead of completing the merge: the
@@ -134,30 +146,113 @@ async fn resolve_conflict(
     Ok(true)
 }
 
+/// Default wall-clock cap for one verify.sh run (env-overridable via
+/// AGENTLOOP_GATE_TIMEOUT_SECS). Agents all run under `item_timeout`, but the
+/// gate used to run unbounded — a verify.sh that hangs (waits on a port, reads
+/// stdin, infinite loop) hung the entire loop forever with no kill path.
+const GATE_TIMEOUT_SECS: u64 = 1800;
+
 /// Run verify.sh; capture output to last_gate.txt (latest run) and append it to
-/// logs/gate.log (every run, forever); return its exit code (1 if absent).
+/// logs/gate.log (every run, forever); return its exit code (1 if absent,
+/// 124 on timeout).
 pub fn gate(ws: &Path) -> i32 {
     let gate = ws.join(".agentloop/verify.sh");
     let out = ws.join(".agentloop/state/last_gate.txt");
+    let timeout = Duration::from_secs(crate::limits::env_secs(
+        "AGENTLOOP_GATE_TIMEOUT_SECS",
+        GATE_TIMEOUT_SECS,
+    ));
     let (code, buf): (i32, Vec<u8>) = if gate.exists() {
-        match std::process::Command::new("/bin/bash")
-            .arg(&gate)
-            .current_dir(ws)
-            .output()
-        {
-            Ok(o) => {
-                let mut buf = o.stdout.clone();
-                buf.extend_from_slice(&o.stderr);
-                (o.status.code().unwrap_or(1), buf)
-            }
-            Err(_) => (1, b"verify.sh spawn failed".to_vec()),
-        }
+        run_gate_script(ws, &gate, timeout)
     } else {
         (1, b"no verify.sh yet".to_vec())
     };
-    let _ = std::fs::write(&out, &buf);
+    if let Err(e) = std::fs::write(&out, &buf) {
+        // last_gate.txt is the manager/architect feedback signal; a silent write
+        // failure would feed them stale gate output.
+        eprintln!("gate: could not write {}: {e}", out.display());
+    }
     append_gate_log(ws, code, &buf);
     code
+}
+
+/// Run verify.sh in its own process group with a wall-clock cap. stdout/stderr
+/// are drained on threads (an undrained pipe would deadlock a chatty script).
+/// On timeout the whole group gets SIGTERM, a 1s grace, then SIGKILL — same
+/// discipline as agent spawns. The group is registered so quit/SIGINT
+/// (kill_all_agents) reaps an in-flight gate too.
+fn run_gate_script(ws: &Path, script: &Path, timeout: Duration) -> (i32, Vec<u8>) {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let child = std::process::Command::new("/bin/bash")
+        .arg(script)
+        .current_dir(ws)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0) // own group: timeout/quit kills descendants too
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return (1, format!("verify.sh spawn failed: {e}").into_bytes()),
+    };
+    let pgid = child.id() as i32;
+    spawn::register_pgid(pgid);
+
+    let mut readers = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        readers.push(std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf);
+            buf
+        }));
+    }
+    if let Some(mut err) = child.stderr.take() {
+        readers.push(std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf);
+            buf
+        }));
+    }
+
+    let deadline = Instant::now() + timeout;
+    let code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code().unwrap_or(1),
+            Ok(None) if Instant::now() >= deadline => {
+                use nix::sys::signal::{killpg, Signal};
+                use nix::unistd::Pid;
+                let pg = Pid::from_raw(pgid);
+                let _ = killpg(pg, Signal::SIGTERM);
+                std::thread::sleep(Duration::from_secs(1));
+                let _ = killpg(pg, Signal::SIGKILL);
+                let _ = child.wait();
+                break 124;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => break 1,
+        }
+    };
+    spawn::unregister_pgid(pgid);
+
+    let mut buf = Vec::new();
+    for r in readers {
+        if let Ok(b) = r.join() {
+            buf.extend_from_slice(&b);
+        }
+    }
+    if code == 124 {
+        buf.extend_from_slice(
+            format!(
+                "\nverify.sh timed out after {}s and was killed (cap: AGENTLOOP_GATE_TIMEOUT_SECS)",
+                timeout.as_secs()
+            )
+            .as_bytes(),
+        );
+    }
+    (code, buf)
 }
 
 /// Append one gate run (timestamp, rc, full output) to `.agentloop/logs/gate.log`.
@@ -184,8 +279,9 @@ fn append_gate_log(ws: &Path, code: i32, output: &[u8]) {
 
 /// Run the gate with TUI/event visibility. Full verify.sh runs take minutes,
 /// and an unreported gate makes the loop look dead while it grinds — the job
-/// row is the only signal that the run is still working.
-fn gate_reported(ws: &Path, reporter: &Arc<dyn Reporter>, label: &str) -> i32 {
+/// row is the only signal that the run is still working. The gate itself runs
+/// on the blocking pool so a long verify.sh never stalls a runtime worker.
+async fn gate_reported(ws: &Path, reporter: &Arc<dyn Reporter>, label: &str) -> i32 {
     reporter.dispatch(
         "gate",
         label,
@@ -193,7 +289,10 @@ fn gate_reported(ws: &Path, reporter: &Arc<dyn Reporter>, label: &str) -> i32 {
         "",
         Some(&ws.join(".agentloop/state/last_gate.txt")),
     );
-    let rc = gate(ws);
+    let ws2 = ws.to_path_buf();
+    let rc = tokio::task::spawn_blocking(move || gate(&ws2))
+        .await
+        .unwrap_or(1);
     if rc == 0 {
         reporter.status("gate", "done", "", "", "");
     } else {
@@ -296,7 +395,7 @@ fn active_business_ids(bk: &Path, ws: &Path) -> Result<Vec<String>> {
 }
 
 fn customer_feedback(ws: &Path, task_id: &str) -> String {
-    std::fs::read_to_string(task_state::customer_path(ws, task_id))
+    let fb = std::fs::read_to_string(task_state::customer_path(ws, task_id))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|v| {
@@ -306,7 +405,11 @@ fn customer_feedback(ws: &Path, task_id: &str) -> String {
                 .map(str::to_string)
         })
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "customer rejected the completed task".to_string())
+        .unwrap_or_else(|| "customer rejected the completed task".to_string());
+    // Same E2BIG budget as gate feedback: this string lands in backlog.json
+    // notes / redesign.json and is inlined into manager+architect prompts, so a
+    // customer that pastes a test dump would recreate the argv crash loop.
+    crate::limits::clamp_str(&fb, FEEDBACK_MAX_BYTES as usize)
 }
 
 /// Retire a stale customer review into the task's archive dir (never deleted;
@@ -358,13 +461,26 @@ fn reopen_parent_for_redesign(
     Ok(())
 }
 
+/// Cap on any agent-produced feedback embedded in a task note (gate output,
+/// customer rejection notes). Notes are stored in backlog.json and inlined into
+/// manager/architect prompts, so an unbounded string (a verbose verify.sh once
+/// wrote 365KB) would push the spawn argv past the OS ARG_MAX and every
+/// dispatch would die with E2BIG ("Argument list too long") — a crash loop,
+/// since the bloated backlog persists across runs.
+const FEEDBACK_MAX_BYTES: u64 = 8 * 1024;
+
 fn gate_failure_feedback(ws: &Path) -> String {
-    let output = std::fs::read_to_string(ws.join(".agentloop/state/last_gate.txt"))
-        .unwrap_or_default()
+    let path = ws.join(".agentloop/state/last_gate.txt");
+    let full_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let output = crate::limits::log_tail(&path, FEEDBACK_MAX_BYTES)
         .trim()
         .to_string();
     if output.is_empty() {
         "verify.sh failed; redesign required".to_string()
+    } else if full_len > FEEDBACK_MAX_BYTES {
+        format!(
+            "verify.sh failed; redesign required (output truncated to the last {FEEDBACK_MAX_BYTES} bytes; full output in .agentloop/state/last_gate.txt):\n{output}"
+        )
     } else {
         format!("verify.sh failed; redesign required:\n{output}")
     }
@@ -399,6 +515,14 @@ fn reopen_unapproved_done_tasks(bk: &Path, ws: &Path) -> Result<u32> {
 /// backlog must never hold open work the orchestrator can never dispatch, or the
 /// loop stalls/standbys with open items and nothing to do.
 fn repair_backlog(bk: &Path, ws: &Path, max_redesigns: u32) -> Result<()> {
+    // 0) Clamp oversized notes. A backlog poisoned by an unbounded note (e.g.
+    //    written by a pre-cap binary) would E2BIG every spawn forever; this
+    //    self-heals it instead of crash-looping across runs.
+    for id in state::clamp_oversized_notes(bk, FEEDBACK_MAX_BYTES as usize * 2)? {
+        eprintln!("repair: clamped oversized notes on {id}");
+        crate::history::record(ws, "task", &id, "repair", "clamped oversized notes");
+    }
+
     // 1) Deps on ids missing from the backlog can never be satisfied (e.g. a
     //    manager that leaked task-local sub-item ids) — drop them.
     for (id, dep) in state::strip_unknown_deps(bk)? {
@@ -474,8 +598,25 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
     );
     let ok = manager::manager_run(cfg, ws, &ldir.join("manager.log"), itimeout).await?;
     if !ok {
-        eprintln!("manager failed/invalid");
-        anyhow::bail!("manager invalid");
+        // A doubly-invalid manager round is recoverable: skip the iteration
+        // instead of killing the whole autonomous run. If it persists the
+        // stall detector ends the run with the failure visible.
+        eprintln!("manager failed/invalid; skipping this iteration");
+        reporter.status(
+            "manager",
+            "failed",
+            &mtool,
+            &mmodel,
+            "invalid backlog twice; iteration skipped",
+        );
+        crate::history::record(
+            ws,
+            "agent",
+            "manager",
+            "invalid",
+            "manager produced an invalid backlog twice; iteration skipped",
+        );
+        return Ok(0);
     }
     reporter.status("manager", "done", &mtool, &mmodel, "");
     let _ = reopen_unapproved_done_tasks(&bk, ws)?;
@@ -504,7 +645,13 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             reporter.status(&aid, "done", &atool, &amodel, "");
         } else {
             state::set_status(&bk, id, "ready", "architect produced invalid task plan")?;
-            reporter.status(&aid, "failed", &atool, &amodel, "architect produced invalid task plan");
+            reporter.status(
+                &aid,
+                "failed",
+                &atool,
+                &amodel,
+                "architect produced invalid task plan",
+            );
         }
     }
 
@@ -536,7 +683,13 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "failed",
                     &format!("exceeded max_attempts ({maxatt})"),
                 )?;
-                reporter.status(&id, "failed", "", "", &format!("exceeded max_attempts ({maxatt})"));
+                reporter.status(
+                    &id,
+                    "failed",
+                    "",
+                    "",
+                    &format!("exceeded max_attempts ({maxatt})"),
+                );
                 if dispatched
                     .iter()
                     .any(|(dispatched_task_id, _)| dispatched_task_id == task_id)
@@ -552,7 +705,8 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                 continue;
             };
             let wt = ws.join(format!(".agentloop/worktrees/{id}"));
-            let _ = std::fs::remove_dir_all(&wt);
+            // worktree::remove handles the ordering (git remove before rm,
+            // then prune) so leftovers from a crashed run can't wedge re-adds.
             worktree::remove(ws, &wt, &format!("item/{id}"));
             if worktree::create(ws, &format!("item/{id}"), &wt).is_err() {
                 let note = format!("builder {id} failed before dispatch: worktree create failed");
@@ -563,7 +717,13 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "failed",
                     "worktree create failed",
                 )?;
-                reporter.status(&id, "failed", "", "", "worktree create failed before dispatch");
+                reporter.status(
+                    &id,
+                    "failed",
+                    "",
+                    "",
+                    "worktree create failed before dispatch",
+                );
                 if dispatched
                     .iter()
                     .any(|(dispatched_task_id, _)| dispatched_task_id == task_id)
@@ -663,6 +823,24 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "builder reported done but made no commits",
                 )?;
                 reporter.status(id, "bounced", "", "", "reported done but made no commits");
+            } else if worktree::is_dirty(ws) {
+                // Never merge into a dirty user tree: the merge (or the
+                // permission-skipping resolver agent after a conflict) could
+                // clobber or silently commit the user's uncommitted work.
+                task_state::set_builder_status(
+                    ws,
+                    task_id,
+                    id,
+                    "ready",
+                    "workspace has uncommitted changes; merge skipped — commit or stash them",
+                )?;
+                reporter.status(
+                    id,
+                    "bounced",
+                    "",
+                    "",
+                    "workspace dirty (uncommitted changes); merge skipped",
+                );
             } else {
                 match worktree::merge_or_conflict(ws, &branch)? {
                     MergeOutcome::Merged => {
@@ -693,7 +871,13 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                                 "ready",
                                 "merge conflict; resolver failed",
                             )?;
-                            reporter.status(id, "bounced", "", "", "merge conflict; resolver failed");
+                            reporter.status(
+                                id,
+                                "bounced",
+                                "",
+                                "",
+                                "merge conflict; resolver failed",
+                            );
                         }
                     }
                 }
@@ -706,7 +890,13 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                 "ready",
                 "builder did not report done",
             )?;
-            reporter.status(id, "failed", "", "", "did not report done (missing/invalid result file or status != done)");
+            reporter.status(
+                id,
+                "failed",
+                "",
+                "",
+                "did not report done (missing/invalid result file or status != done)",
+            );
         }
         worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
         let _ = crate::history::archive_file(&rfile, &ldir);
@@ -722,7 +912,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         {
             continue;
         }
-        if gate_reported(ws, reporter, &format!("verify gate · {task_id}")) != 0 {
+        if gate_reported(ws, reporter, &format!("verify gate · {task_id}")).await != 0 {
             let feedback = gate_failure_feedback(ws);
             reopen_parent_for_redesign(&bk, ws, &task_id, &feedback, maxatt)?;
             continue;
@@ -763,6 +953,10 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
 
     while n < maxit {
         n += 1;
+        if spawn::shutdown_requested() {
+            eprintln!("STOP: shutdown requested");
+            return Ok(1);
+        }
         if start.elapsed() >= budget {
             eprintln!("STOP: time budget exceeded");
             return Ok(1);
@@ -771,7 +965,7 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
         let merged = iterate(cfg, ws, n, &reporter).await?;
         let _ = reopen_unapproved_done_tasks(&bk, ws)?;
 
-        let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}"));
+        let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}")).await;
         let gate_state = if grc == 0 { "pass" } else { "fail" };
         let open = state::open_count(&bk)?;
         let failed = state::failed_count(&bk)?;
@@ -838,32 +1032,41 @@ pub async fn run_interactive(
                 match cmd {
                     Command::Quit => return Ok(0),
                     Command::AddTask { request } => {
-                        let _ = crate::requests::append(ws, &request);
+                        if let Err(e) = crate::requests::append(ws, &request) {
+                            reporter.status(
+                                "addtask",
+                                "failed",
+                                "",
+                                "",
+                                &format!("could not queue request: {e:#}"),
+                            );
+                        }
                     }
                     Command::StartRun { .. } => {}
                 }
+            }
+            // Quit/SIGINT must stop the loop at the next boundary even if the
+            // Quit command itself was lost (e.g. signal path).
+            if spawn::shutdown_requested() {
+                return Ok(0);
             }
 
             let open = state::open_count(&bk).unwrap_or(0);
             let failed = state::failed_count(&bk).unwrap_or(0);
             if iters_this_window >= maxit {
                 eprintln!("STOP(window): max_iterations");
-                break 'working format!(
-                    "max_iterations ({maxit}) · {open} open / {failed} failed"
-                );
+                break 'working format!("max_iterations ({maxit}) · {open} open / {failed} failed");
             }
             if window_start.elapsed() >= budget {
                 eprintln!("STOP(window): budget");
-                break 'working format!(
-                    "budget exhausted · {open} open / {failed} failed"
-                );
+                break 'working format!("budget exhausted · {open} open / {failed} failed");
             }
 
             n += 1;
             iters_this_window += 1;
             let merged = iterate(cfg, ws, n, &reporter).await?;
             let _ = reopen_unapproved_done_tasks(&bk, ws)?;
-            let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}"));
+            let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}")).await;
             let gate_state = if grc == 0 { "pass" } else { "fail" };
             let open = state::open_count(&bk)?;
             let failed = state::failed_count(&bk)?;
@@ -876,9 +1079,7 @@ pub async fn run_interactive(
             let fp = state::progress_fingerprint(&bk, ws);
             if stall.observe(merged, gate_state, &fp) {
                 eprintln!("STOP: no progress (stall)");
-                break 'working format!(
-                    "no progress (stall) · {open} open / {failed} failed"
-                );
+                break 'working format!("no progress (stall) · {open} open / {failed} failed");
             }
         };
 
@@ -887,7 +1088,15 @@ pub async fn run_interactive(
         match crx.recv().await {
             None | Some(Command::Quit) => return Ok(0),
             Some(Command::AddTask { request }) => {
-                let _ = crate::requests::append(ws, &request);
+                if let Err(e) = crate::requests::append(ws, &request) {
+                    reporter.status(
+                        "addtask",
+                        "failed",
+                        "",
+                        "",
+                        &format!("could not queue request: {e:#}"),
+                    );
+                }
             }
             Some(Command::StartRun { .. }) => {}
         }
@@ -995,6 +1204,107 @@ mod tests {
             "plan is kept for inspection when the cap is hit"
         );
 
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn gate_failure_feedback_is_bounded_for_huge_gate_output() {
+        let ws = tmp_ws("orch-feedback-cap");
+        std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
+        // A verbose verify.sh (xcodebuild-style) once wrote 365KB to
+        // last_gate.txt; embedded unbounded into task notes it pushed
+        // backlog.json past ARG_MAX and every agent spawn died with E2BIG.
+        let huge = format!(
+            "{}FINAL FAILURE LINE",
+            "line of verify output\n".repeat(20_000)
+        );
+        std::fs::write(ws.join(".agentloop/state/last_gate.txt"), &huge).unwrap();
+
+        let note = gate_failure_feedback(&ws);
+
+        assert!(note.starts_with("verify.sh failed; redesign required"));
+        assert!(
+            note.len() <= 16 * 1024,
+            "note must stay bounded, got {} bytes",
+            note.len()
+        );
+        assert!(
+            note.contains("FINAL FAILURE LINE"),
+            "the tail of the output (where failures land) is kept"
+        );
+        assert!(
+            note.contains("last_gate.txt"),
+            "truncated note points at the full gate output"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn customer_feedback_is_bounded_for_huge_review_notes() {
+        let ws = tmp_ws("orch-customer-cap");
+        let tdir = ws.join(".agentloop/state/tasks/task-1");
+        std::fs::create_dir_all(&tdir).unwrap();
+        // A customer that pastes a full test dump into acceptance_notes would
+        // recreate the E2BIG argv crash loop via backlog notes/redesign.json.
+        let huge = format!("STARTS HERE {}", "review detail\n".repeat(20_000));
+        std::fs::write(
+            tdir.join("customer.json"),
+            serde_json::to_vec(&json!({"status":"rejected","acceptance_notes": huge})).unwrap(),
+        )
+        .unwrap();
+
+        let fb = customer_feedback(&ws, "task-1");
+
+        assert!(fb.len() <= 9 * 1024, "bounded, got {} bytes", fb.len());
+        assert!(fb.starts_with("STARTS HERE"));
+        assert!(fb.contains("[truncated"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn gate_times_out_and_kills_a_hung_verify_sh() {
+        let ws = tmp_ws("orch-gate-timeout");
+        std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
+        // A verify.sh that hangs (port wait, stdin read, infinite loop) used to
+        // hang the whole loop forever — there was no gate timeout at all.
+        std::fs::write(ws.join(".agentloop/verify.sh"), "#!/bin/bash\nsleep 600\n").unwrap();
+        std::env::set_var("AGENTLOOP_GATE_TIMEOUT_SECS", "1");
+
+        let start = std::time::Instant::now();
+        let rc = gate(&ws);
+        std::env::remove_var("AGENTLOOP_GATE_TIMEOUT_SECS");
+
+        assert_eq!(rc, 124, "timeout reported like timeout(1)");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "killed promptly, took {:?}",
+            start.elapsed()
+        );
+        let last = std::fs::read_to_string(ws.join(".agentloop/state/last_gate.txt")).unwrap();
+        assert!(last.contains("timed out"), "feedback names the timeout");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn repair_backlog_clamps_poisoned_notes() {
+        let ws = tmp_ws("orch-clamp-notes");
+        setup(&ws);
+        let bk = ws.join(".agentloop/state/backlog.json");
+        // Simulate a backlog bloated by a pre-cap binary: a 365KB-style note.
+        state::set_status(&bk, "task-1", "in_progress", &"x".repeat(300_000)).unwrap();
+
+        repair_backlog(&bk, &ws, 3).unwrap();
+
+        let v = state::read(&bk).unwrap();
+        let notes = state::item(&v, "task-1").unwrap()["notes"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            notes.len() <= 2 * FEEDBACK_MAX_BYTES as usize + 100,
+            "self-healed, got {} bytes",
+            notes.len()
+        );
         let _ = std::fs::remove_dir_all(&ws);
     }
 

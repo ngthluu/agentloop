@@ -59,7 +59,7 @@ pub fn wait_duration(limit: &UsageLimit, now_epoch: i64) -> Duration {
     Duration::from_secs(secs.min(6 * 3600))
 }
 
-fn env_secs(key: &str, default: u64) -> u64 {
+pub(crate) fn env_secs(key: &str, default: u64) -> u64 {
     std::env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
@@ -69,6 +69,51 @@ fn env_secs(key: &str, default: u64) -> u64 {
 /// Last `max_bytes` of `path` as lossy UTF-8; "" when missing/unreadable.
 pub fn log_tail(path: &Path, max_bytes: u64) -> String {
     log_tail_from(path, 0, max_bytes)
+}
+
+/// Clamp `s` to at most `max_bytes` (UTF-8 boundary safe), keeping the head and
+/// appending a truncation marker. Used to bound every agent-produced string that
+/// flows into backlog notes or prompts — unbounded strings there reach the spawn
+/// argv and die with E2BIG (the 365KB gate-output incident), and the bloated
+/// state persists across runs as a crash loop.
+pub fn clamp_str(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Reserve room for the marker so the RESULT also fits in max_bytes:
+    // clamping must be idempotent (re-clamping an already-clamped note is a
+    // no-op, or the self-heal pass would rewrite the backlog every round).
+    let budget = max_bytes.saturating_sub(64);
+    let mut end = budget;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} … [truncated: {} of {} bytes]", &s[..end], end, s.len())
+}
+
+/// Clamp `s` to roughly `max_bytes` keeping the head and the tail (UTF-8 boundary
+/// safe) with an elision marker between them. Used for oversized prompts, where
+/// the instructions live at both ends and the middle is bulk context.
+pub fn clamp_middle(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let half = max_bytes / 2;
+    let mut head_end = half;
+    while head_end > 0 && !s.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = s.len() - half;
+    while tail_start < s.len() && !s.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!(
+        "{}\n… [elided {} bytes from the middle: input exceeded the {} byte cap] …\n{}",
+        &s[..head_end],
+        tail_start - head_end,
+        max_bytes,
+        &s[tail_start..]
+    )
 }
 
 /// Like [`log_tail`], but never reads bytes before `start_offset` — used to scan
@@ -149,6 +194,30 @@ mod tests {
             wait_duration(&far, 1_700_000_000),
             Duration::from_secs(6 * 3600)
         );
+    }
+
+    #[test]
+    fn clamp_str_bounds_and_respects_char_boundaries() {
+        assert_eq!(clamp_str("short", 100), "short");
+        let big = "x".repeat(10_000);
+        let c = clamp_str(&big, 1024);
+        assert!(c.len() < 1100, "clamped, got {} bytes", c.len());
+        assert!(c.contains("[truncated"));
+        // Multi-byte chars at the cut point never panic or split.
+        let uni = "é".repeat(1000); // 2 bytes each
+        let c = clamp_str(&uni, 101); // 101 lands mid-char
+        assert!(c.starts_with('é') && c.contains("[truncated"));
+    }
+
+    #[test]
+    fn clamp_middle_keeps_head_and_tail() {
+        let s = format!("HEAD-{}—TAIL", "m".repeat(50_000));
+        let c = clamp_middle(&s, 8 * 1024);
+        assert!(c.len() < 9 * 1024);
+        assert!(c.starts_with("HEAD-"));
+        assert!(c.ends_with("TAIL"));
+        assert!(c.contains("[elided"));
+        assert_eq!(clamp_middle("small", 1024), "small");
     }
 
     #[test]

@@ -29,6 +29,31 @@ The `claude` and/or `codex` CLIs must also be on `PATH` at runtime.
 
 Rust (edition 2021), git, and the `claude` and/or `codex` CLIs on PATH.
 
+**Platforms: macOS and Linux only.** agentloop manages agent processes with POSIX
+process groups and signals; it does not build on Windows (a clear `compile_error!`
+says so). Use WSL on Windows.
+
+## Security model — read this first
+
+agentloop is built to run **unattended**, which means it deliberately removes the
+safety prompts you may be used to:
+
+- Every agent is spawned with permission checks disabled (`claude
+  --dangerously-skip-permissions`, `codex --yolo`). Agents can run any shell
+  command, edit any file your user can, and access the network.
+- `.agentloop/verify.sh` is executed via `bash` on every iteration. It is
+  arbitrary code living inside the workspace — anything that can write to the
+  workspace (including the agents themselves) controls what it does.
+- Task descriptions, designs, and notes written by one agent are fed into the
+  prompts of others. agentloop sanitizes the *identifiers* (branch/path safety)
+  and bounds the *sizes*, but it cannot make prompt content trustworthy.
+
+Therefore: **only point agentloop at goals and workspaces you trust, with
+credentials you accept being exercised autonomously.** For anything else, run it
+inside a container or VM with scoped credentials. A run can also spend real API
+credits for hours; set `caps.total_budget_sec` / `caps.max_iterations`
+accordingly and watch the first runs of a new goal.
+
 ## Build
 
 ```bash
@@ -57,9 +82,18 @@ Options:
 
 - `--config <path>` — `config.json` path. By default agentloop uses
   `$AGENTLOOP_CONFIG` when set, otherwise `~/.agentloop/config.json`.
-- `--fresh` — wipe existing `.agentloop` state and start over
+- `--fresh` — wipe existing `.agentloop` state and start over. Prompts for
+  confirmation (it deletes all run state, logs, and results); pass `--yes` to
+  skip the prompt in scripts. The existing goal is preserved unless you pass a
+  new one.
+- `--yes` — skip confirmation prompts (required for `--fresh` when not on a TTY)
 - `--max-iterations N` — override `caps.max_iterations` from config
 - `--dry-run` — run the manager once and print the business backlog; do not dispatch builders
+- `--report` — print the bounce/failure troubleshooting report for the workspace and exit
+
+One run per workspace: agentloop holds an advisory lock on
+`.agentloop/state/.lock`; a second concurrent run on the same workspace exits
+with an error instead of corrupting shared state.
 
 ## How it works
 
@@ -74,6 +108,9 @@ Options:
 - **Gate and customer:** `.agentloop/verify.sh` still gates software behavior, so
   agentloop can target any kind of software. After the gate passes for a business
   task, the customer approves or rejects that task by its acceptance criteria.
+  The gate runs in its own process group with a wall-clock cap (default 30 min,
+  override with `AGENTLOOP_GATE_TIMEOUT_SECS`) so a hung verify.sh can never
+  hang the loop; a timeout reads as a gate failure (rc 124).
 - **Caps:** `max_iterations`, `max_parallel`, `item_timeout_sec`, `total_budget_sec`,
   `max_attempts`. The loop also stops on a no-progress stall: two consecutive
   iterations that merge nothing **and** change no loop-relevant state (gate verdict,
@@ -109,8 +146,10 @@ Options:
   counts).
 - **Failed tasks hold the run open:** a task that exhausts its redesign cap is marked
   `failed`, but the run is only DONE when the gate passes and **no open or failed**
-  items remain — the manager gets another round to reshape or drop every failure
-  (its prompt requires this) instead of the loop silently ending over abandoned work.
+  items remain. Every failed item — including leaves nothing depends on — is listed
+  in the manager prompt with its failure note, and the manager is required to
+  reshape it into new tasks or drop it, instead of the loop silently ending over
+  (or grinding forever against) abandoned work.
 - **Re-run = more context:** re-running with new goal text (without `--fresh`) appends it
   to `goal.md` and queues it as a pending request, so the manager folds it into the
   business backlog as new tasks and the loop re-engages instead of reporting an instant

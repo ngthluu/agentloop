@@ -235,12 +235,24 @@ fn read_json(path: &Path) -> Result<Value> {
     serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))
 }
 
+/// Atomic, durable write (fsync before rename — see `state::write_atomic` for
+/// why); per-process counter in the temp name so concurrent builder tasks in
+/// one process never collide on the temp path.
 fn write_atomic(path: &Path, v: &Value) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let tmp = dir.join(format!(".task-state.{}.tmp", std::process::id()));
+    let tmp = dir.join(format!(
+        ".task-state.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, serde_json::to_vec_pretty(v)?)
         .with_context(|| format!("write {}", tmp.display()))?;
+    if let Ok(f) = std::fs::File::open(&tmp) {
+        let _ = f.sync_all();
+    }
     std::fs::rename(&tmp, path).with_context(|| format!("rename {}", path.display()))?;
     Ok(())
 }
@@ -270,7 +282,10 @@ fn builder_item_valid(item: &Value, task_id: &str) -> bool {
         && item
             .get("id")
             .and_then(|id| id.as_str())
-            .map(|id| id.starts_with(&format!("{task_id}-")))
+            // safe_id: builder ids become git branch names (item/<id>) and
+            // worktree paths — an unsanitized LLM id like "../../x" would be a
+            // path-traversal write into the user's machine.
+            .map(|id| id.starts_with(&format!("{task_id}-")) && crate::state::safe_id(id))
             .unwrap_or(false)
         && item.get("deps").and_then(|deps| deps.as_array()).is_some()
         && matches!(

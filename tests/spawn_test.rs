@@ -369,3 +369,44 @@ async fn agent_run_does_not_rescan_stale_limit_text_from_earlier_attempts() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn build_argv_clamps_oversized_prompts_below_arg_strlen() {
+    // Linux caps a single argv string at MAX_ARG_STRLEN (~128KB); an oversized
+    // prompt dies at exec with E2BIG. build_argv is the final chokepoint.
+    let huge = format!(
+        "INSTRUCTIONS HEAD {} OUTPUT CONTRACT TAIL",
+        "ctx ".repeat(200_000)
+    );
+    let a = spawn::build_argv(&cfg(), "manager", &huge).unwrap();
+    let prompt = &a[2]; // claude -p <prompt> ...
+    assert!(
+        prompt.len() <= 121 * 1024,
+        "clamped below MAX_ARG_STRLEN, got {} bytes",
+        prompt.len()
+    );
+    assert!(prompt.starts_with("INSTRUCTIONS HEAD"), "head kept");
+    assert!(prompt.ends_with("OUTPUT CONTRACT TAIL"), "tail kept");
+    assert!(prompt.contains("[elided"), "elision is explicit");
+}
+
+#[tokio::test]
+async fn run_with_timeout_rejects_empty_argv() {
+    let log = std::env::temp_dir().join(format!(
+        "alspawn-empty-{}.log",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let r = spawn::run_with_timeout(
+        &[],
+        &PathBuf::from("."),
+        &log,
+        Duration::from_secs(1),
+        false,
+    )
+    .await;
+    assert!(r.is_err(), "empty argv is an error, not a panic");
+    let _ = std::fs::remove_file(&log);
+}

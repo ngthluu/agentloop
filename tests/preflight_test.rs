@@ -27,7 +27,10 @@ fn check_fails_when_a_configured_tool_is_not_installed() {
     let err = preflight::check_with_path(&cfg, "/nonexistent-dir").unwrap_err();
     let msg = format!("{err:#}");
     assert!(msg.contains("claude"), "names the missing tool: {msg}");
-    assert!(msg.contains("manager"), "names the roles that need it: {msg}");
+    assert!(
+        msg.contains("manager"),
+        "names the roles that need it: {msg}"
+    );
     assert!(msg.contains("install"), "tells the user to install: {msg}");
 }
 

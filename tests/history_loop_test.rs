@@ -58,7 +58,10 @@ async fn happy_iteration_records_terminal_events() {
     assert!(has("done", "manager"), "manager done recorded");
     assert!(has("done", "architect-task-1"), "architect done recorded");
     assert!(has("merged", "task-1-b1"), "builder merge recorded");
-    assert!(has("approved", "task-1-customer"), "customer approval recorded");
+    assert!(
+        has("approved", "task-1-customer"),
+        "customer approval recorded"
+    );
 
     clear_env();
     let _ = std::fs::remove_dir_all(&ws);
@@ -83,7 +86,10 @@ async fn builder_results_are_archived_into_the_iter_log_dir_not_deleted() {
         .unwrap()
         .flatten()
         .any(|e| e.file_name().to_string_lossy().ends_with("-task-1-b1.json"));
-    assert!(archived, "builder result archived into .agentloop/logs/iter-1/");
+    assert!(
+        archived,
+        "builder result archived into .agentloop/logs/iter-1/"
+    );
 
     clear_env();
     let _ = std::fs::remove_dir_all(&ws);

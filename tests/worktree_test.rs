@@ -15,12 +15,18 @@ fn git(repo: &Path, args: &[&str]) {
 }
 
 fn init_repo() -> std::path::PathBuf {
+    // pid + counter: nanos alone collide when parallel tests start in the same
+    // tick, and two tests sharing one repo dir fail confusingly.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "alwt-{}",
+        "alwt-{}-{}-{}",
+        std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
     git(&dir, &["init", "-q"]);
@@ -153,4 +159,43 @@ fn git_output_is_captured_to_run_log() {
         log.contains("git worktree add"),
         "git invocation logged: {log}"
     );
+}
+
+#[test]
+fn is_dirty_detects_uncommitted_tracked_changes() {
+    let repo = init_repo();
+    assert!(!worktree::is_dirty(&repo), "clean tree");
+
+    // Untracked files alone are fine — merges don't touch them.
+    std::fs::write(repo.join("untracked.txt"), "x").unwrap();
+    assert!(!worktree::is_dirty(&repo), "untracked-only stays clean");
+
+    // Modified tracked file = dirty (a merge could clobber it).
+    std::fs::write(repo.join("seed.txt"), "modified").unwrap();
+    assert!(worktree::is_dirty(&repo), "unstaged change is dirty");
+
+    git(&repo, &["add", "seed.txt"]);
+    assert!(worktree::is_dirty(&repo), "staged change is dirty");
+
+    git(&repo, &["commit", "-qm", "commit it"]);
+    assert!(!worktree::is_dirty(&repo), "clean again after commit");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn remove_recovers_even_when_dir_was_rmrfd_first() {
+    // A crashed run can leave .git/worktrees metadata with the dir already
+    // gone; remove() must prune so the next create() for the same id works.
+    let repo = init_repo();
+    let wt = repo.join(".agentloop/worktrees/it-9");
+    std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+    worktree::create(&repo, "item/it-9", &wt).unwrap();
+
+    // Simulate the crash artifact: dir removed behind git's back.
+    std::fs::remove_dir_all(&wt).unwrap();
+    worktree::remove(&repo, &wt, "item/it-9");
+
+    worktree::create(&repo, "item/it-9", &wt).expect("re-create after stale metadata must succeed");
+    worktree::remove(&repo, &wt, "item/it-9");
+    let _ = std::fs::remove_dir_all(&repo);
 }

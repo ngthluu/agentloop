@@ -26,21 +26,41 @@ fn log_git(repo: &Path, args: &[&str], out: &std::process::Output) {
 /// Run git, capturing stdout+stderr (never inheriting them onto the TUI). Returns
 /// whether the command succeeded.
 fn git(repo: &Path, args: &[&str]) -> Result<bool> {
+    Ok(git_out(repo, args)?.status.success())
+}
+
+/// Like [`git`] but returns the full captured output, so callers can surface
+/// git's stderr in failure notes instead of burying it in run.log.
+fn git_out(repo: &Path, args: &[&str]) -> Result<std::process::Output> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(args)
         .output()?;
     log_git(repo, args, &out);
-    Ok(out.status.success())
+    Ok(out)
+}
+
+/// First non-empty stderr line of a git invocation, for failure notes.
+fn stderr_line(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 pub fn create(repo: &Path, branch: &str, path: &Path) -> Result<()> {
-    let p = path.to_str().unwrap();
-    if git(repo, &["worktree", "add", "-q", "-b", branch, p, "HEAD"])? {
+    // Paths are passed as &str through the shared arg slice; a non-UTF-8
+    // workspace path is rejected with an error instead of a panic.
+    let Some(p) = path.to_str() else {
+        bail!("worktree path is not valid UTF-8: {}", path.display());
+    };
+    let out = git_out(repo, &["worktree", "add", "-q", "-b", branch, p, "HEAD"])?;
+    if out.status.success() {
         Ok(())
     } else {
-        bail!("worktree add failed for {branch}")
+        bail!("worktree add failed for {branch}: {}", stderr_line(&out))
     }
 }
 
@@ -54,10 +74,30 @@ pub fn merge(repo: &Path, branch: &str) -> Result<bool> {
     }
 }
 
+/// Best-effort worktree cleanup. Order matters: `git worktree remove` must run
+/// while the directory still exists — rm-ing the dir first orphans the
+/// `.git/worktrees/<name>` metadata and the next `worktree add` for a reused id
+/// fails with "missing but locked". `prune` then clears any metadata a crashed
+/// prior run left behind.
 pub fn remove(repo: &Path, path: &Path, branch: &str) {
-    let p = path.to_str().unwrap_or("");
-    let _ = git(repo, &["worktree", "remove", "--force", p]);
+    if let Some(p) = path.to_str() {
+        let _ = git(repo, &["worktree", "remove", "--force", p]);
+    }
+    if path.exists() {
+        let _ = std::fs::remove_dir_all(path);
+    }
+    let _ = git(repo, &["worktree", "prune"]);
     let _ = git(repo, &["branch", "-D", branch]);
+}
+
+/// Whether the working tree has uncommitted (staged or unstaged) changes to
+/// tracked files. Untracked files are allowed — merges don't touch them unless
+/// they collide, and git refuses that on its own. Errors read as dirty: never
+/// merge on an unverifiable tree.
+pub fn is_dirty(repo: &Path) -> bool {
+    let unstaged = git(repo, &["diff", "--quiet"]).unwrap_or(false);
+    let staged = git(repo, &["diff", "--cached", "--quiet"]).unwrap_or(false);
+    !(unstaged && staged)
 }
 
 /// Outcome of attempting to merge a worker branch into main.
