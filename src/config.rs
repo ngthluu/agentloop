@@ -14,7 +14,7 @@ pub const DEFAULT_CONFIG_JSON: &str = r#"{
   "routing": {
     "manager": { "tool": "claude", "model": "opus", "effort": "high" },
     "architect": { "tool": "claude", "model": "opus", "effort": "high" },
-    "builder": { "tool": "codex", "model": "gpt-5", "effort": "high" },
+    "builder": { "tool": "codex", "effort": "high" },
     "customer": { "tool": "claude", "model": "sonnet", "effort": "medium" },
     "resolver": { "tool": "claude", "model": "sonnet", "effort": "medium" }
   },

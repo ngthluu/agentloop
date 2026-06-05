@@ -115,3 +115,15 @@ fn caps_default_when_absent() {
     assert_eq!(cfg.item_timeout_sec(), 1200);
     assert_eq!(cfg.resolve_role("anything"), None);
 }
+
+#[test]
+fn default_builder_has_no_pinned_model() {
+    let path = temp_path("defaults/config.json");
+    Config::ensure_default_config(&path).unwrap();
+    let cfg = Config::load(&path).unwrap();
+
+    assert_eq!(cfg.role_field("builder", "tool").as_deref(), Some("codex"));
+    // codex model slugs churn (gpt-5 no longer exists); never pin one in the
+    // default config — the tool's own default applies.
+    assert_eq!(cfg.role_field("builder", "model"), None);
+}

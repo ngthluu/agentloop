@@ -410,3 +410,22 @@ async fn run_with_timeout_rejects_empty_argv() {
     assert!(r.is_err(), "empty argv is an error, not a panic");
     let _ = std::fs::remove_file(&log);
 }
+
+#[test]
+fn codex_argv_without_model_omits_model_flag() {
+    let c: Config = serde_json::from_str(
+        r#"{ "routing": { "builder": { "tool": "codex", "effort": "high" } },
+             "defaults": { "role": "builder" } }"#,
+    )
+    .unwrap();
+    let a = spawn::build_argv(&c, "builder", "GO").unwrap();
+    assert!(
+        !a.iter().any(|s| s == "-m"),
+        "no -m flag when no model is pinned: {a:?}"
+    );
+    assert!(a.contains(&"--yolo".to_string()));
+    assert!(
+        a.iter().any(|s| s == "model_reasoning_effort=high"),
+        "effort still passed without a model"
+    );
+}
