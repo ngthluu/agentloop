@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::events::EventLineReporter;
+use crate::events::{EventLineReporter, RecordingReporter, Reporter};
 use crate::orchestrator;
 
 const TEMPLATE_MASTER: &str = include_str!("../templates/master.md");
@@ -30,15 +30,21 @@ struct Args {
     /// Plan only; do not dispatch workers
     #[arg(long)]
     dry_run: bool,
+    /// Print the bounce/failure troubleshooting report for the workspace and exit
+    #[arg(long)]
+    report: bool,
 }
 
+/// Run git, capturing (and discarding) its output — bootstrap probes like
+/// `git config user.email` and `git rev-parse HEAD` must not print onto the
+/// user's terminal. Returns whether the command succeeded.
 fn git(repo: &Path, args: &[&str]) -> bool {
     Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(args)
-        .status()
-        .map(|s| s.success())
+        .output()
+        .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
@@ -149,6 +155,11 @@ pub async fn run() -> Result<()> {
     let started = std::time::Instant::now();
     let args = Args::parse();
     let ws = args.workspace.clone().unwrap_or(std::env::current_dir()?);
+    if args.report {
+        let ws = ws.canonicalize().unwrap_or(ws);
+        print!("{}", crate::history::report(&ws));
+        return Ok(());
+    }
     if args.fresh {
         let _ = std::fs::remove_dir_all(ws.join(".agentloop"));
     }
@@ -177,6 +188,8 @@ pub async fn run() -> Result<()> {
     if let Some(m) = args.max_iterations {
         cfg.caps.max_iterations = Some(m);
     }
+
+    crate::preflight::check(&cfg)?;
 
     use std::io::IsTerminal;
     let is_tty = std::io::stdout().is_terminal();
@@ -208,7 +221,11 @@ pub async fn run() -> Result<()> {
         let rc = crate::app::run_tui(cfg, ws.clone(), goal_text).await?;
         std::process::exit(rc);
     } else {
-        let rc = orchestrator::run(&cfg, &ws, Arc::new(EventLineReporter)).await?;
+        let reporter: Arc<dyn Reporter> = Arc::new(RecordingReporter::new(
+            ws.clone(),
+            Arc::new(EventLineReporter),
+        ));
+        let rc = orchestrator::run(&cfg, &ws, reporter).await?;
         eprintln!(
             "=== agentloop finished (rc={rc}) in {}. See {}/.agentloop/state/master.md ===",
             crate::tui::fmt_elapsed(started.elapsed()),

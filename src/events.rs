@@ -1,5 +1,6 @@
 use chrono::Local;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Progress sink. Phase 1 uses EventLineReporter (stderr lines, mirroring the
@@ -7,8 +8,9 @@ use tokio::sync::mpsc;
 pub trait Reporter: Send + Sync {
     /// A job has been dispatched. `log` is the job's log file.
     fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str, log: Option<&Path>);
-    /// A job changed status (done/failed/merged/bounced/...).
-    fn status(&self, id: &str, status: &str, tool: &str, model: &str);
+    /// A job changed status (done/failed/merged/bounced/...). `note` is the
+    /// human-readable reason for failures/bounces ("" when there is none).
+    fn status(&self, id: &str, status: &str, tool: &str, model: &str, note: &str);
     /// End-of-iteration summary line.
     fn iteration(&self, n: u32, merged: u32, gate: &str, open: i64);
     /// The loop entered the standby state (Phase 3). Default: no-op.
@@ -32,8 +34,20 @@ impl Reporter for EventLineReporter {
             label
         );
     }
-    fn status(&self, id: &str, status: &str, tool: &str, model: &str) {
-        eprintln!("{}  {:<9} {:<10} {}/{}", hms(), status, id, tool, model);
+    fn status(&self, id: &str, status: &str, tool: &str, model: &str, note: &str) {
+        if note.is_empty() {
+            eprintln!("{}  {:<9} {:<10} {}/{}", hms(), status, id, tool, model);
+        } else {
+            eprintln!(
+                "{}  {:<9} {:<10} {}/{}  {}",
+                hms(),
+                status,
+                id,
+                tool,
+                model,
+                note
+            );
+        }
     }
     fn iteration(&self, n: u32, merged: u32, gate: &str, open: i64) {
         eprintln!("iter {n}: merged={merged} gate={gate} open={open}");
@@ -96,7 +110,7 @@ impl Reporter for ChannelReporter {
             log_path: log.map(|p| p.to_path_buf()),
         });
     }
-    fn status(&self, id: &str, status: &str, _tool: &str, _model: &str) {
+    fn status(&self, id: &str, status: &str, _tool: &str, _model: &str, _note: &str) {
         let _ = self.tx.send(Event::JobStatus {
             id: id.into(),
             status: status.into(),
@@ -112,5 +126,46 @@ impl Reporter for ChannelReporter {
     }
     fn standby(&self) {
         let _ = self.tx.send(Event::EnteredStandby);
+    }
+}
+
+/// Decorator that persists every dispatch/status/iteration to
+/// `.agentloop/state/events.jsonl` (via crate::history) before forwarding, so
+/// bounces and failures survive after the TUI exits and are queryable with
+/// `agentloop --report`.
+pub struct RecordingReporter {
+    ws: PathBuf,
+    inner: Arc<dyn Reporter>,
+}
+
+impl RecordingReporter {
+    pub fn new(ws: PathBuf, inner: Arc<dyn Reporter>) -> Self {
+        Self { ws, inner }
+    }
+}
+
+impl Reporter for RecordingReporter {
+    fn dispatch(&self, id: &str, label: &str, tool: &str, model: &str, log: Option<&Path>) {
+        // status="running" marks the start of a job's life in the event log.
+        crate::history::record(&self.ws, "dispatch", id, "running", label);
+        self.inner.dispatch(id, label, tool, model, log);
+    }
+    fn status(&self, id: &str, status: &str, tool: &str, model: &str, note: &str) {
+        crate::history::record(&self.ws, "status", id, status, note);
+        self.inner.status(id, status, tool, model, note);
+    }
+    fn iteration(&self, n: u32, merged: u32, gate: &str, open: i64) {
+        crate::history::record(
+            &self.ws,
+            "iteration",
+            &format!("iter-{n}"),
+            gate,
+            &format!("merged={merged} open={open}"),
+        );
+        self.inner.iteration(n, merged, gate, open);
+    }
+    fn standby(&self) {
+        // Not recorded: standby is a UI session state, not a job lifecycle event.
+        self.inner.standby();
     }
 }

@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::events::{ChannelReporter, Command, Event, Reporter};
+use crate::events::{ChannelReporter, Command, Event, RecordingReporter, Reporter};
 use crate::orchestrator;
 use crate::tui::{self, AppState};
 
@@ -83,17 +83,24 @@ impl Drop for StderrRedirect {
     }
 }
 
-/// On SIGTERM while the TUI is up, raw mode is on and the alt screen is active. Restore
-/// the terminal best-effort, kill in-flight agents, and exit so nothing is orphaned.
+/// On SIGINT/SIGTERM while the TUI path is active, raw mode may be on and the alt
+/// screen active. Restore the terminal best-effort, kill in-flight agents, and exit
+/// so nothing is orphaned. (While the TUI event loop runs, raw mode swallows Ctrl-C
+/// into a key event; this covers the startup/shutdown windows where raw mode is off.)
 #[cfg(unix)]
-fn install_tui_sigterm_handler() {
+fn install_tui_signal_handler() {
     tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(_) => return,
+        let (Ok(mut term), Ok(mut int)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) else {
+            return;
         };
-        term.recv().await;
+        let code = tokio::select! {
+            _ = term.recv() => 143,
+            _ = int.recv() => 130,
+        };
         let _ = disable_raw_mode();
         let _ = execute!(
             std::io::stdout(),
@@ -101,18 +108,21 @@ fn install_tui_sigterm_handler() {
             crossterm::cursor::Show
         );
         crate::spawn::kill_all_agents();
-        std::process::exit(143);
+        std::process::exit(code);
     });
 }
 
 pub async fn run_tui(cfg: Config, ws: PathBuf, goal: String) -> Result<i32> {
     #[cfg(unix)]
-    install_tui_sigterm_handler();
+    install_tui_signal_handler();
 
     let (etx, mut erx) = mpsc::unbounded_channel::<Event>();
     let (ctx, mut crx) = mpsc::unbounded_channel::<Command>();
 
-    let reporter: Arc<dyn Reporter> = Arc::new(ChannelReporter::new(etx));
+    let reporter: Arc<dyn Reporter> = Arc::new(RecordingReporter::new(
+        ws.clone(),
+        Arc::new(ChannelReporter::new(etx)),
+    ));
     let cfg_o = cfg.clone();
     let ws_o = ws.clone();
     let orch = tokio::spawn(async move {

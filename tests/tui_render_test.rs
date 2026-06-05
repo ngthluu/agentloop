@@ -153,3 +153,19 @@ fn customer_review_statuses_render_glyphs_not_question_mark() {
         "rejected renders ✗"
     );
 }
+
+#[test]
+fn long_goal_is_ellipsized_and_counters_stay_visible() {
+    let long_goal = "Implement a production-ready chat app, has 2 part: FE is a swift mac app, \
+                     BE is rust-based. This chat app supports DM chat and group chat, support \
+                     emoji picker, attach file. This chat app is secured, e2e encryption everything.";
+    let s = started(long_goal);
+    let backend = TestBackend::new(80, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+
+    assert!(find(&term, "\u{23f1}").is_some(), "⏱ running time visible");
+    assert!(find(&term, "open:").is_some(), "open counter visible");
+    assert!(find(&term, "iter").is_some(), "iteration counter visible");
+    assert!(find(&term, "…").is_some(), "goal is ellipsized");
+}

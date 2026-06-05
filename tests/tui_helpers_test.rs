@@ -13,6 +13,16 @@ fn formats_seconds_minutes_hours() {
     assert_eq!(fmt_elapsed(Duration::from_secs(3600 + 5 * 60)), "1h05m");
 }
 
+#[test]
+fn ellipsize_truncates_on_char_boundaries() {
+    use agentloop::tui::ellipsize;
+    assert_eq!(ellipsize("hello", 10), "hello");
+    assert_eq!(ellipsize("hello", 5), "hello");
+    assert_eq!(ellipsize("hello world", 8), "hello w…");
+    assert_eq!(ellipsize("hello", 1), "…");
+    assert_eq!(ellipsize("hello", 0), "");
+}
+
 use agentloop::tui::tail_file;
 
 #[test]

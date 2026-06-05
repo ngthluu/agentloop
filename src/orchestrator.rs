@@ -78,6 +78,7 @@ fn auto_answer_pending(ws: &Path) {
 /// Spawn an unbounded resolver agent in the main workspace to resolve an in-progress
 /// merge conflict for `id`, then complete the merge. Returns true if the merge is
 /// resolved and committed.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_conflict(
     cfg: &Config,
     ws: &Path,
@@ -110,47 +111,74 @@ async fn resolve_conflict(
     // Resolved iff no unmerged paths remain. If the agent resolved+staged but didn't
     // commit, finish the merge ourselves.
     if worktree::has_unmerged(ws) {
-        reporter.status(&rid, "failed", &tool, &model);
+        reporter.status(&rid, "failed", &tool, &model, "resolver left unmerged paths");
         return Ok(false);
     }
     if worktree::merge_in_progress(ws) && !worktree::commit_merge(ws) {
-        reporter.status(&rid, "failed", &tool, &model);
+        reporter.status(&rid, "failed", &tool, &model, "resolver could not commit the merge");
         return Ok(false);
     }
     // Guard against a resolver that aborted instead of completing the merge: the
     // branch's commits must now be contained in HEAD.
     if worktree::has_commits_ahead(ws, branch) {
-        reporter.status(&rid, "failed", &tool, &model);
+        reporter.status(
+            &rid,
+            "failed",
+            &tool,
+            &model,
+            "resolver did not complete the merge (branch commits not in HEAD)",
+        );
         return Ok(false);
     }
-    reporter.status(&rid, "merged", &tool, &model);
+    reporter.status(&rid, "merged", &tool, &model, "");
     Ok(true)
 }
 
-/// Run verify.sh; capture output to last_gate.txt; return its exit code (1 if absent).
+/// Run verify.sh; capture output to last_gate.txt (latest run) and append it to
+/// logs/gate.log (every run, forever); return its exit code (1 if absent).
 pub fn gate(ws: &Path) -> i32 {
     let gate = ws.join(".agentloop/verify.sh");
     let out = ws.join(".agentloop/state/last_gate.txt");
-    if gate.exists() {
-        let result = std::process::Command::new("/bin/bash")
+    let (code, buf): (i32, Vec<u8>) = if gate.exists() {
+        match std::process::Command::new("/bin/bash")
             .arg(&gate)
             .current_dir(ws)
-            .output();
-        match result {
+            .output()
+        {
             Ok(o) => {
                 let mut buf = o.stdout.clone();
                 buf.extend_from_slice(&o.stderr);
-                let _ = std::fs::write(&out, &buf);
-                o.status.code().unwrap_or(1)
+                (o.status.code().unwrap_or(1), buf)
             }
-            Err(_) => {
-                let _ = std::fs::write(&out, "verify.sh spawn failed");
-                1
-            }
+            Err(_) => (1, b"verify.sh spawn failed".to_vec()),
         }
     } else {
-        let _ = std::fs::write(&out, "no verify.sh yet");
-        1
+        (1, b"no verify.sh yet".to_vec())
+    };
+    let _ = std::fs::write(&out, &buf);
+    append_gate_log(ws, code, &buf);
+    code
+}
+
+/// Append one gate run (timestamp, rc, full output) to `.agentloop/logs/gate.log`.
+fn append_gate_log(ws: &Path, code: i32, output: &[u8]) {
+    use std::io::Write;
+    let log = ws.join(".agentloop/logs/gate.log");
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
+        let _ = writeln!(
+            f,
+            "=== {} rc={code} ===",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+        let _ = f.write_all(output);
+        let _ = writeln!(f);
     }
 }
 
@@ -216,16 +244,29 @@ fn customer_feedback(ws: &Path, task_id: &str) -> String {
         .unwrap_or_else(|| "customer rejected the completed task".to_string())
 }
 
+/// Retire a stale customer review into the task's archive dir (never deleted;
+/// rejected reviews are the troubleshooting trail for redesigns).
 fn clear_customer_review(ws: &Path, task_id: &str) {
-    let _ = std::fs::remove_file(task_state::customer_path(ws, task_id));
-    let _ = std::fs::remove_file(
-        ws.join(".agentloop/results")
+    let dir = task_state::task_dir(ws, task_id).join("archive");
+    let _ = crate::history::archive_file(&task_state::customer_path(ws, task_id), &dir);
+    let _ = crate::history::archive_file(
+        &ws.join(".agentloop/results")
             .join(format!("{task_id}-customer.json")),
+        &dir,
     );
 }
 
 fn invalidate_task_plan(ws: &Path, task_id: &str) {
-    let _ = std::fs::remove_file(task_state::builders_path(ws, task_id));
+    let dir = task_state::task_dir(ws, task_id).join("archive");
+    // The next architect pass overwrites design.md in place; keep a copy of the
+    // failed design alongside the failed plan.
+    let design = task_state::task_dir(ws, task_id).join("design.md");
+    if design.exists() {
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::copy(&design, dir.join(format!("{stamp}-design.md")));
+    }
+    let _ = crate::history::archive_file(&task_state::builders_path(ws, task_id), &dir);
     clear_customer_review(ws, task_id);
 }
 
@@ -240,15 +281,13 @@ fn reopen_parent_for_redesign(
     if count >= max_redesigns {
         // The task keeps failing after its builders complete. Stop the redesign loop:
         // mark it failed (so it leaves the open set) and keep the plan for inspection.
-        state::set_status(
-            bk,
-            task_id,
-            "failed",
-            &format!("redesign cap ({max_redesigns}) reached; last failure: {note}"),
-        )?;
+        let reason = format!("redesign cap ({max_redesigns}) reached; last failure: {note}");
+        state::set_status(bk, task_id, "failed", &reason)?;
+        crate::history::record(ws, "task", task_id, "failed", &reason);
     } else {
         // Under the cap: reopen for a fresh, feedback-informed architect pass.
         state::set_status(bk, task_id, "ready", note)?;
+        crate::history::record(ws, "task", task_id, "redesign", note);
         invalidate_task_plan(ws, task_id);
     }
     Ok(())
@@ -373,7 +412,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         eprintln!("manager failed/invalid");
         anyhow::bail!("manager invalid");
     }
-    reporter.status("manager", "done", &mtool, &mmodel);
+    reporter.status("manager", "done", &mtool, &mmodel, "");
     let _ = reopen_unapproved_done_tasks(&bk, ws)?;
     repair_backlog(&bk, ws, maxatt)?;
 
@@ -397,10 +436,10 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         let ok = architect::architect_run(cfg, ws, &task, &log, itimeout).await?;
         if ok && task_state::builder_plan_valid(ws, id) {
             state::set_status(&bk, id, "in_progress", "")?;
-            reporter.status(&aid, "done", &atool, &amodel);
+            reporter.status(&aid, "done", &atool, &amodel, "");
         } else {
             state::set_status(&bk, id, "ready", "architect produced invalid task plan")?;
-            reporter.status(&aid, "failed", &atool, &amodel);
+            reporter.status(&aid, "failed", &atool, &amodel, "architect produced invalid task plan");
         }
     }
 
@@ -432,6 +471,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "failed",
                     &format!("exceeded max_attempts ({maxatt})"),
                 )?;
+                reporter.status(&id, "failed", "", "", &format!("exceeded max_attempts ({maxatt})"));
                 if dispatched
                     .iter()
                     .any(|(dispatched_task_id, _)| dispatched_task_id == task_id)
@@ -458,6 +498,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "failed",
                     "worktree create failed",
                 )?;
+                reporter.status(&id, "failed", "", "", "worktree create failed before dispatch");
                 if dispatched
                     .iter()
                     .any(|(dispatched_task_id, _)| dispatched_task_id == task_id)
@@ -521,10 +562,13 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
             // "you decide" answer and re-dispatch with the prior Q&A appended to
             // the builder prompt. Re-dispatch consumes an attempt, so a builder
             // that asks forever still hits max_attempts -> redesign.
-            if crate::inbox::has_question(ws, id) {
+            let note = if crate::inbox::has_question(ws, id) {
                 if let Err(e) = auto_answer(ws, id) {
                     eprintln!("auto-answer failed for {id}: {e:#}");
                     task_state::set_builder_status(ws, task_id, id, "ready", "auto-answer failed")?;
+                    "needs_input: auto-answer failed; re-dispatching"
+                } else {
+                    "needs_input: auto-answered; re-dispatching"
                 }
             } else {
                 // Malformed/missing question file: treat as a normal non-done bounce.
@@ -535,10 +579,11 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "ready",
                     "needs_input without a question file",
                 )?;
-            }
-            reporter.status(id, "bounced", "", "");
+                "needs_input without a question file"
+            };
+            reporter.status(id, "bounced", "", "", note);
             worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
-            let _ = std::fs::remove_file(&rfile);
+            let _ = crate::history::archive_file(&rfile, &ldir);
             continue;
         }
 
@@ -552,12 +597,12 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "ready",
                     "builder reported done but made no commits",
                 )?;
-                reporter.status(id, "bounced", "", "");
+                reporter.status(id, "bounced", "", "", "reported done but made no commits");
             } else {
                 match worktree::merge_or_conflict(ws, &branch)? {
                     MergeOutcome::Merged => {
                         task_state::set_builder_status(ws, task_id, id, "done", "")?;
-                        reporter.status(id, "merged", "", "");
+                        reporter.status(id, "merged", "", "", "");
                         merged += 1;
                     }
                     MergeOutcome::Conflict => {
@@ -567,7 +612,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                             .await?
                         {
                             task_state::set_builder_status(ws, task_id, id, "done", "")?;
-                            reporter.status(id, "merged", "", "");
+                            reporter.status(id, "merged", "", "", "");
                             merged += 1;
                         } else {
                             // The resolver itself is unbounded (it never consumes an
@@ -583,7 +628,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                                 "ready",
                                 "merge conflict; resolver failed",
                             )?;
-                            reporter.status(id, "bounced", "", "");
+                            reporter.status(id, "bounced", "", "", "merge conflict; resolver failed");
                         }
                     }
                 }
@@ -596,10 +641,10 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                 "ready",
                 "builder did not report done",
             )?;
-            reporter.status(id, "failed", "", "");
+            reporter.status(id, "failed", "", "", "did not report done (missing/invalid result file or status != done)");
         }
         worktree::remove(ws, &ws.join(format!(".agentloop/worktrees/{id}")), &branch);
-        let _ = std::fs::remove_file(&rfile);
+        let _ = crate::history::archive_file(&rfile, &ldir);
     }
 
     for (task_id, note) in pending_redesign {
@@ -630,11 +675,11 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         if customer::customer_run(cfg, ws, &task, &log, itimeout).await? {
             state::set_status(&bk, &task_id, "done", "")?;
             task_state::reset_redesign(ws, &task_id);
-            reporter.status(&cid, "approved", &ctool, &cmodel);
+            reporter.status(&cid, "approved", &ctool, &cmodel, "");
         } else {
             let feedback = customer_feedback(ws, &task_id);
             reopen_parent_for_redesign(&bk, ws, &task_id, &feedback, maxatt)?;
-            reporter.status(&cid, "rejected", &ctool, &cmodel);
+            reporter.status(&cid, "rejected", &ctool, &cmodel, &feedback);
         }
     }
 
@@ -848,6 +893,20 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(fb, "gate failed");
 
+        let archive = ws.join(".agentloop/state/tasks/task-1/archive");
+        let archived_plan = std::fs::read_dir(&archive)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with("-builders.json"));
+        assert!(archived_plan, "invalidated plan is archived, not deleted");
+        let events = crate::history::read_events(&ws);
+        assert!(
+            events
+                .iter()
+                .any(|e| e["kind"] == "task" && e["id"] == "task-1" && e["status"] == "redesign"),
+            "redesign recorded in events.jsonl"
+        );
+
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -932,6 +991,26 @@ mod tests {
             1,
             "deadlock consumes a redesign"
         );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn gate_appends_every_run_to_gate_log() {
+        let ws = tmp_ws("orch-gatelog");
+        std::fs::create_dir_all(ws.join(".agentloop/state")).unwrap();
+
+        assert_eq!(gate(&ws), 1); // no verify.sh yet
+        std::fs::write(ws.join(".agentloop/verify.sh"), "#!/bin/bash\nexit 0\n").unwrap();
+        assert_eq!(gate(&ws), 0);
+
+        let log = std::fs::read_to_string(ws.join(".agentloop/logs/gate.log")).unwrap();
+        assert_eq!(log.matches("=== ").count(), 2, "both runs recorded");
+        assert!(log.contains("rc=1") && log.contains("rc=0"));
+        assert!(
+            ws.join(".agentloop/state/last_gate.txt").exists(),
+            "latest-run file still maintained"
+        );
+
         let _ = std::fs::remove_dir_all(&ws);
     }
 

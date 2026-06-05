@@ -62,11 +62,13 @@ pub fn prior_qa_block(ws: &Path, id: &str) -> Result<String> {
     }
 }
 
-/// Archive the question file under logs/ so it isn't re-raised.
+/// Archive the question file under logs/ (timestamped, never overwritten) so it
+/// isn't re-raised.
 pub fn consume_question(ws: &Path, id: &str) -> Result<()> {
     let q = qpath(ws, id);
     if q.exists() {
-        let dest = ws.join(format!(".agentloop/logs/answered-{id}.json"));
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let dest = ws.join(format!(".agentloop/logs/answered-{id}-{stamp}.json"));
         std::fs::rename(&q, &dest).or_else(|_| std::fs::remove_file(&q))?;
     }
     Ok(())

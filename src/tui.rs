@@ -280,6 +280,19 @@ impl AppState {
     }
 }
 
+/// Truncate `s` to at most `max` chars, ending in `…` when cut.
+pub fn ellipsize(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
+}
+
 /// Human working-time: "{s}s" under a minute, "{m}m{s:02}s" under an hour,
 /// else "{h}h{m:02}m".
 pub fn fmt_elapsed(d: std::time::Duration) -> String {
@@ -376,19 +389,19 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
         ])
         .split(area);
 
-    // --- Top status bar ---
+    // --- Top status bar: the fixed suffix (iter/gate/open/⏱) always fits; the
+    // goal gets the remaining width and is ellipsized so a long goal can't push
+    // the counters off-screen. Newlines would break the one-line bar.
     let total = fmt_elapsed(s.total_elapsed());
-    let status_text = if s.standby {
-        format!(
-            " ✓ DONE · standby  │  {}  │  iter {}  │  gate: {}  │  open: {}  │  ⏱ {}",
-            s.goal, s.iter, s.gate, s.open, total
-        )
-    } else {
-        format!(
-            " {}  │  iter {}  │  gate: {}  │  open: {}  │  ⏱ {}",
-            s.goal, s.iter, s.gate, s.open, total
-        )
-    };
+    let prefix = if s.standby { " ✓ DONE · standby  │  " } else { " " };
+    let suffix = format!(
+        "  │  iter {}  │  gate: {}  │  open: {}  │  ⏱ {}",
+        s.iter, s.gate, s.open, total
+    );
+    let avail = (chunks[0].width as usize)
+        .saturating_sub(prefix.chars().count() + suffix.chars().count());
+    let goal = ellipsize(&s.goal.replace('\n', " "), avail);
+    let status_text = format!("{prefix}{goal}{suffix}");
     let status_bar = Paragraph::new(status_text).style(
         Style::default()
             .bg(Color::DarkGray)
