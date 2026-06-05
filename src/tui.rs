@@ -527,6 +527,11 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
 
     let area = f.area();
 
+    if s.in_model_config() {
+        render_model_config(f, s, area);
+        return;
+    }
+
     if s.in_goal_entry() {
         render_goal_entry(f, s, area);
         return;
@@ -628,9 +633,9 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
     f.render_widget(input, fchunks[0]);
 
     let hint = if s.standby {
-        " ✓ standby · [enter] submit  [shift+enter] newline  [↑↓] jobs  [esc] clear  [q] quit"
+        " ✓ standby · [enter] submit  [shift+enter] newline  [↑↓] jobs  [ctrl-o] models  [esc] clear  [q] quit"
     } else {
-        " [enter] submit  [shift+enter] newline  [↑↓] jobs  [esc] clear  [q] quit"
+        " [enter] submit  [shift+enter] newline  [↑↓] jobs  [ctrl-o] models  [esc] clear  [q] quit"
     };
     let hint_para = Paragraph::new(Line::from(hint)).style(Style::default().fg(Color::DarkGray));
     f.render_widget(hint_para, fchunks[1]);
@@ -693,6 +698,84 @@ fn render_goal_entry(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(button, chunks[3]);
+
+    let hint = Paragraph::new(Line::from(" [ctrl-o] models — pick tool/model/effort per role"))
+        .style(Style::default().fg(Color::DarkGray));
+    f.render_widget(hint, chunks[4]);
+}
+
+fn render_model_config(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout::Rect) {
+    use ratatui::layout::{Constraint, Direction, Layout};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Paragraph};
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(area);
+
+    let (sel_row, sel_col) = s.model_selection();
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        format!(" {:<12} {:<10} {:<24} {:<10}", "role", "tool", "model", "effort"),
+        Style::default().fg(Color::DarkGray),
+    ))];
+    for (i, row) in s.model_rows().iter().enumerate() {
+        let cell = |col: usize, value: &str| -> Span<'static> {
+            // The selected cell is highlighted; an in-progress edit shows the
+            // buffer with a cursor mark instead of the stored value.
+            let editing = i == sel_row && col == sel_col && s.model_edit_buffer().is_some();
+            let text = if editing {
+                format!("{}▏", s.model_edit_buffer().unwrap_or(""))
+            } else if value.is_empty() {
+                "(default)".to_string()
+            } else {
+                value.to_string()
+            };
+            let width = match col {
+                0 => 10,
+                1 => 24,
+                _ => 10,
+            };
+            let padded = format!("{text:<width$}");
+            if i == sel_row && col == sel_col {
+                Span::styled(
+                    padded,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw(padded)
+            }
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:<12} ", row.role),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            cell(0, &row.tool),
+            Span::raw(" "),
+            cell(1, &row.model),
+            Span::raw(" "),
+            cell(2, &row.effort),
+        ]));
+    }
+    let panel = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Model routing — saved to config.json ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    f.render_widget(panel, chunks[0]);
+
+    let hint =
+        " [↑↓←→] move  [enter] edit / cycle tool  [esc] close  ·  empty model/effort = tool default";
+    f.render_widget(
+        Paragraph::new(Line::from(hint)).style(Style::default().fg(Color::DarkGray)),
+        chunks[1],
+    );
 }
 
 fn render_job_detail(f: &mut ratatui::Frame, s: &AppState, area: ratatui::layout::Rect) {

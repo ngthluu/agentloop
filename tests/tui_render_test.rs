@@ -169,3 +169,68 @@ fn long_goal_is_ellipsized_and_counters_stay_visible() {
     assert!(find(&term, "iter").is_some(), "iteration counter visible");
     assert!(find(&term, "…").is_some(), "goal is ellipsized");
 }
+
+fn routed(goal: &str) -> AppState {
+    use agentloop::tui::RoleEntry;
+    let mut s = AppState::new(goal.into());
+    s.set_routing(vec![
+        RoleEntry {
+            role: "architect".into(),
+            tool: "claude".into(),
+            model: "opus".into(),
+            effort: "high".into(),
+        },
+        RoleEntry {
+            role: "builder".into(),
+            tool: "codex".into(),
+            model: String::new(),
+            effort: "high".into(),
+        },
+    ]);
+    s
+}
+
+#[test]
+fn model_config_panel_renders_roles_values_and_defaults() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut s = routed("");
+    s.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+
+    let backend = TestBackend::new(100, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+
+    assert!(find(&term, "Model routing").is_some(), "panel title rendered");
+    assert!(find(&term, "architect").is_some());
+    assert!(find(&term, "opus").is_some());
+    assert!(
+        find(&term, "(default)").is_some(),
+        "unpinned model shows (default)"
+    );
+    assert!(find(&term, "[esc] close").is_some(), "close hint shown");
+}
+
+#[test]
+fn footer_hints_advertise_ctrl_o() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    // Goal-entry screen.
+    let s = routed("");
+    let backend = TestBackend::new(100, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+    assert!(
+        find(&term, "ctrl-o").is_some(),
+        "goal entry advertises the model picker"
+    );
+
+    // List view footer.
+    let mut s = routed("g");
+    s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let backend = TestBackend::new(120, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| tui::render(f, &s)).unwrap();
+    assert!(
+        find(&term, "[ctrl-o] models").is_some(),
+        "list footer advertises the model picker"
+    );
+}
