@@ -75,7 +75,11 @@ Options:
   agentloop can target any kind of software. After the gate passes for a business
   task, the customer approves or rejects that task by its acceptance criteria.
 - **Caps:** `max_iterations`, `max_parallel`, `item_timeout_sec`, `total_budget_sec`,
-  `max_attempts`. The loop also stops on a no-progress stall.
+  `max_attempts`. The loop also stops on a no-progress stall: two consecutive
+  iterations that merge nothing **and** change no loop-relevant state (gate verdict,
+  backlog/builder statuses and attempts). Iterations where the manager re-scopes a
+  failed task or a builder consumes an attempt count as progress — those are
+  cap-bounded, so they can't keep the loop alive forever.
 - **Parallelism:** independent ready items run concurrently, each in its own git worktree;
   successful builders are merged back sequentially.
 - **Merge conflicts:** when a builder's branch conflicts on merge, agentloop spawns a
@@ -100,7 +104,13 @@ Options:
   the manager folds it into the business backlog on its next round (you feed intent;
   the manager stays the sole owner of the backlog).
 - **Standby:** on completion (or a cap/stall) the interactive run idles in standby instead
-  of exiting; adding a task re-engages it with a fresh budget window.
+  of exiting; adding a task re-engages it with a fresh budget window. The status bar
+  shows *why* it parked (done / stall / max_iterations / budget, with open and failed
+  counts).
+- **Failed tasks hold the run open:** a task that exhausts its redesign cap is marked
+  `failed`, but the run is only DONE when the gate passes and **no open or failed**
+  items remain — the manager gets another round to reshape or drop every failure
+  (its prompt requires this) instead of the loop silently ending over abandoned work.
 - **Re-run = more context:** re-running with new goal text (without `--fresh`) appends it
   to `goal.md` and queues it as a pending request, so the manager folds it into the
   business backlog as new tasks and the loop re-engages instead of reporting an instant
@@ -121,9 +131,12 @@ sits at the bottom of the screen at all times (similar to Claude Code's input). 
 - `q` — quit (only when the input bar is empty); `Ctrl-C` always quits
 
 The status bar shows the goal, current iteration, gate state, open-item count, and a
-live `⏱` total-run-time readout; `✓ DONE · standby` appears when the run is idle and
-waiting. (Headless runs print the total elapsed time on exit.) Long goals are ellipsized
-so the counters and timer always stay visible.
+live `⏱` total-run-time readout. When the run parks, the banner says why:
+`✓ DONE · standby` only when everything is done and the gate passes, otherwise
+`⏸ standby: <reason>` (stall / max_iterations / budget, with open and failed counts).
+The gate itself appears as a `gate` job row while `verify.sh` runs, so a long verify
+never looks like a dead loop. (Headless runs print the total elapsed time on exit.)
+Long goals are ellipsized so the counters and timer always stay visible.
 
 The main panel is the Jobs list (full width).
 
