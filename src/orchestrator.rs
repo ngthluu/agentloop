@@ -1109,6 +1109,8 @@ pub async fn run_interactive(
                     }
                     break;
                 }
+                // The goal was already committed when the run first started;
+                // standby StartRun is a re-engage only (same as pre-restructure).
                 Some(Command::StartRun { .. }) => break,
                 // Routing edits don't re-engage the loop; keep waiting for work.
                 Some(Command::SetRole { role, tool, model, effort }) => {

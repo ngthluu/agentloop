@@ -40,5 +40,9 @@ async fn set_role_before_start_is_consumed_without_starting_work() {
         !ws.join(".agentloop/logs/iter-1").exists(),
         "no iteration ran"
     );
+    assert!(
+        !ws.join(".agentloop/state/goal.md").exists(),
+        "SetRole must not be treated as a run start (commit_goal never called)"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
