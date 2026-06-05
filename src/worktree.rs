@@ -100,6 +100,42 @@ pub fn is_dirty(repo: &Path) -> bool {
     !(unstaged && staged)
 }
 
+/// Commit loop-owned tracked changes under `.agentloop/`. The manager rewrites
+/// `.agentloop/verify.sh` in the MAIN tree and never commits; in workspaces
+/// where that file is tracked, the rewrite left the tree permanently dirty and
+/// `is_dirty` bounced every finished merge until the redesign caps blew.
+///
+/// Pathspec commit: only tracked-file changes under `.agentloop/` are taken
+/// from the working tree. The user's staged files elsewhere stay staged, and
+/// untracked `.agentloop` runtime files (results, logs, state) stay untracked.
+/// No-op on a clean path or mid-merge. Best-effort: a failure here just leaves
+/// the old bounce behavior.
+pub fn commit_agentloop_changes(repo: &Path) {
+    if merge_in_progress(repo) {
+        return;
+    }
+    let Ok(out) = git_out(repo, &["status", "--porcelain", "--", ".agentloop"]) else {
+        return;
+    };
+    let tracked_change = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|l| !l.starts_with("??"));
+    if !tracked_change {
+        return;
+    }
+    let _ = git(
+        repo,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "agentloop: persist loop-owned state (verify gate, task state)",
+            "--",
+            ".agentloop",
+        ],
+    );
+}
+
 /// Outcome of attempting to merge a worker branch into main.
 pub enum MergeOutcome {
     Merged,

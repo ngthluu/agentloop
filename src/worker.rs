@@ -60,6 +60,11 @@ Rules:
   result/question files named below.
 - When finished, write {ws}/.agentloop/results/{id}.json:
   {{"status":"done|failed","summary":"one line","files_changed":["..."]}}
+- If you verify the item and its acceptance criteria ALREADY hold with no edits needed,
+  that is a first-class done: commit nothing, and add "no_changes": true to the result
+  with a summary of the evidence (what you ran and what proved it). Never pad a
+  do-nothing commit just to show activity. A done with no commits and no
+  "no_changes" declaration is rejected.
 - Open decisions are yours: when you hit a product or technical choice, pick the option
   that best serves the business task and its acceptance criteria, note the decision in
   your result summary, and keep going. Nobody reviews questions live.

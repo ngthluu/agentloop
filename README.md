@@ -130,7 +130,15 @@ with an error instead of corrupting shared state.
   failed task or a builder consumes an attempt count as progress — those are
   cap-bounded, so they can't keep the loop alive forever.
 - **Parallelism:** independent ready items run concurrently, each in its own git worktree;
-  successful builders are merged back sequentially.
+  successful builders are merged back sequentially. Loop-owned tracked changes under
+  `.agentloop/` (e.g. the manager's verify.sh rewrites) are auto-committed before
+  integration so they never read as a dirty tree; USER uncommitted changes still block
+  all merges — that bounce refunds the builder's attempt, since the dirty tree says
+  nothing about the work.
+- **No-change dones:** a builder that verifies its item and finds the acceptance
+  criteria already hold reports done with `"no_changes": true` and commits nothing —
+  accepted as a first-class done (the task-scoped gate still judges the task). A done
+  with no commits and no such declaration is bounced as a lazy builder.
 - **Merge conflicts:** when a builder's branch conflicts on merge, agentloop spawns a
   dedicated **resolver** agent (config role `resolver`) in the workspace to resolve the
   conflict and complete the merge, instead of bouncing the item. The resolver is unbounded

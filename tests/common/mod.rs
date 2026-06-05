@@ -180,6 +180,65 @@ exit 0
 
 /// Stub that, as builder, asks a question the FIRST time (needs_input) and completes
 /// the SECOND time (after an answer file exists). Manager seeds one business task.
+/// Builder verifies and finds nothing to change: commits nothing and reports
+/// done with `"no_changes": true`. The gate only needs the seed file, which the
+/// initial commit already provides.
+#[allow(dead_code)]
+pub fn init_ws_with_no_change_stub() -> PathBuf {
+    let ws = init_ws_with_stub();
+    let stub = r##"#!/bin/bash
+tool="$1"; shift
+ws="$WS"; ws_state="$ws/.agentloop/state"; res="$ws/.agentloop/results"
+prompt="$*"
+case "$prompt" in
+  *MANAGER*)
+    echo '{"items":[{"id":"task-1","title":"f","desc":"d","deps":[],"status":"ready","attempts":0,"acceptance":"seed exists"}]}' > "$ws_state/backlog.json"
+    printf '#!/bin/bash\ntest -f "$PWD/seed.txt"\n' > "$ws/.agentloop/verify.sh"; chmod +x "$ws/.agentloop/verify.sh"
+    echo "# updated" > "$ws_state/master.md"
+    ;;
+  *ARCHITECT*)
+    mkdir -p "$ws_state/tasks/task-1"
+    echo "Verify the seed file." > "$ws_state/tasks/task-1/design.md"
+    echo '{"items":[{"id":"task-1-b1","title":"verify seed","desc":"verify seed.txt exists","deps":[],"status":"ready","attempts":0,"acceptance":"seed.txt exists"}]}' > "$ws_state/tasks/task-1/builders.json"
+    ;;
+  *BUILDER*)
+    test -f "$PWD/seed.txt"
+    echo '{"status":"done","summary":"verified: seed.txt present; no changes needed","no_changes":true,"files_changed":[]}' > "$res/task-1-b1.json"
+    ;;
+  *"SILLY CUSTOMER"*)
+    mkdir -p "$ws_state/tasks/task-1"
+    echo '{"status":"approved","summary":"accepted","acceptance_notes":"seed.txt exists"}' > "$ws_state/tasks/task-1/customer.json"
+    echo '{"status":"approved","summary":"accepted"}' > "$res/task-1-customer.json"
+    ;;
+esac
+exit 0
+"##;
+    std::fs::write(ws.join("stub.sh"), stub).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(ws.join("stub.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    ws
+}
+
+/// Like init_ws_with_stub, but `.agentloop/verify.sh` is TRACKED (committed) and
+/// the manager rewrites it each round — leaving the main tree dirty with a
+/// loop-owned change at integration time, the way a real manager does.
+#[allow(dead_code)]
+pub fn init_ws_with_tracked_gate_stub() -> PathBuf {
+    let ws = init_ws_with_stub();
+    std::fs::write(
+        ws.join(".agentloop/verify.sh"),
+        "#!/bin/bash\nexit 1\n", // stale gate; the manager rewrites it below
+    )
+    .unwrap();
+    git(&ws, &["add", ".agentloop/verify.sh"]);
+    git(&ws, &["commit", "-qm", "track gate"]);
+    ws
+}
+
 #[allow(dead_code)]
 pub fn init_ws_with_asking_stub() -> PathBuf {
     let ws = init_ws_with_stub();

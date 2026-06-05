@@ -199,3 +199,76 @@ fn remove_recovers_even_when_dir_was_rmrfd_first() {
     worktree::remove(&repo, &wt, "item/it-9");
     let _ = std::fs::remove_dir_all(&repo);
 }
+
+#[test]
+fn commit_agentloop_changes_commits_only_loop_owned_tracked_files() {
+    // The manager rewrites tracked .agentloop/verify.sh in the main tree and
+    // never commits. commit_agentloop_changes must commit exactly that — and
+    // never the user's staged work or untracked .agentloop runtime files.
+    let repo = init_repo();
+    std::fs::create_dir_all(repo.join(".agentloop/results")).unwrap();
+    std::fs::write(repo.join(".agentloop/verify.sh"), "#!/bin/bash\nexit 1\n").unwrap();
+    git(&repo, &["add", ".agentloop/verify.sh"]);
+    git(&repo, &["commit", "-qm", "track gate"]);
+
+    // Manager rewrite (uncommitted) + user staged work + untracked runtime file.
+    std::fs::write(repo.join(".agentloop/verify.sh"), "#!/bin/bash\nexit 0\n").unwrap();
+    std::fs::write(repo.join("seed.txt"), "user staged work").unwrap();
+    git(&repo, &["add", "seed.txt"]);
+    std::fs::write(repo.join(".agentloop/results/x.json"), "{}").unwrap();
+
+    worktree::commit_agentloop_changes(&repo);
+
+    // Gate rewrite is committed: no diff left under .agentloop.
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["status", "--porcelain", "--", ".agentloop"])
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !status.lines().any(|l| !l.starts_with("??")),
+        "tracked .agentloop changes committed: {status}"
+    );
+    assert!(
+        status.lines().any(|l| l.starts_with("??")),
+        "untracked .agentloop runtime files stay untracked: {status}"
+    );
+
+    // The user's staged work is still staged and uncommitted.
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["diff", "--cached", "--name-only"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "seed.txt",
+        "user's staged file is untouched"
+    );
+    assert!(worktree::is_dirty(&repo), "user work still blocks merges");
+
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn commit_agentloop_changes_is_a_noop_on_a_clean_tree() {
+    let repo = init_repo();
+    let head = |r: &Path| {
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(r)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+
+    // Clean tree: no commit appears.
+    let before = head(&repo);
+    worktree::commit_agentloop_changes(&repo);
+    assert_eq!(before, head(&repo), "no empty commit on a clean tree");
+    let _ = std::fs::remove_dir_all(&repo);
+}

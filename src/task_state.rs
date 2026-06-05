@@ -218,6 +218,26 @@ pub fn increment_builder_attempts(ws: &Path, task_id: &str, builder_id: &str) ->
     write_builders(ws, task_id, &v)
 }
 
+/// Refund an attempt. Used when an item bounces for a reason unrelated to the
+/// builder's work (e.g. the user's tree was dirty at merge time), so an
+/// external condition can't churn the item into max_attempts -> spurious
+/// redesign.
+pub fn decrement_builder_attempts(ws: &Path, task_id: &str, builder_id: &str) -> Result<()> {
+    let mut v = read_builders(ws, task_id)?;
+    if let Some(items) = v["items"].as_array_mut() {
+        for it in items.iter_mut() {
+            if it["id"] == json!(builder_id) {
+                let cur = it
+                    .get("attempts")
+                    .and_then(|attempts| attempts.as_u64())
+                    .unwrap_or(0);
+                it["attempts"] = json!(cur.saturating_sub(1));
+            }
+        }
+    }
+    write_builders(ws, task_id, &v)
+}
+
 pub fn write_customer(ws: &Path, task_id: &str, v: &Value) -> Result<()> {
     ensure_task_dir(ws, task_id)?;
     write_atomic(&customer_path(ws, task_id), v)

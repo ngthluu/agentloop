@@ -800,6 +800,12 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         }
     }
 
+    // Loop-owned tracked changes under .agentloop/ (the manager rewrites
+    // verify.sh in the main tree and never commits) must not read as a dirty
+    // tree below — that bounced every finished merge until the redesign caps
+    // blew. Commit them now; user files are untouched.
+    worktree::commit_agentloop_changes(ws);
+
     // Integrate sequentially based on each builder's result file.
     let mut merged = 0u32;
     for (task_id, id) in &dispatched {
@@ -846,18 +852,48 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         let result_done = status == "done";
         if result_done {
             if !worktree::has_commits_ahead(ws, &branch) {
-                task_state::set_builder_status(
-                    ws,
-                    task_id,
-                    id,
-                    "ready",
-                    "builder reported done but made no commits",
-                )?;
-                reporter.status(id, "bounced", "", "", "reported done but made no commits");
+                // A builder that verified its slice and found the acceptance
+                // criteria already hold has nothing to commit — designs say
+                // "leave it alone instead of churning". That is a first-class
+                // done when declared explicitly; the task-scoped gate still
+                // judges it. An UNdeclared no-commit done stays a bounce (the
+                // anti-laziness guard).
+                let declared_no_changes = result_value
+                    .as_ref()
+                    .map(|v| v["no_changes"] == Value::Bool(true))
+                    .unwrap_or(false);
+                if declared_no_changes {
+                    task_state::set_builder_status(
+                        ws,
+                        task_id,
+                        id,
+                        "done",
+                        "no changes needed (verified)",
+                    )?;
+                    reporter.status(
+                        id,
+                        "done",
+                        "",
+                        "",
+                        "no changes needed; existing code already satisfies the item",
+                    );
+                } else {
+                    task_state::set_builder_status(
+                        ws,
+                        task_id,
+                        id,
+                        "ready",
+                        "builder reported done but made no commits",
+                    )?;
+                    reporter.status(id, "bounced", "", "", "reported done but made no commits");
+                }
             } else if worktree::is_dirty(ws) {
                 // Never merge into a dirty user tree: the merge (or the
                 // permission-skipping resolver agent after a conflict) could
                 // clobber or silently commit the user's uncommitted work.
+                // The dirty tree says nothing about the builder's work, so
+                // the attempt is refunded — an external condition must not
+                // churn the item into max_attempts -> spurious redesign.
                 task_state::set_builder_status(
                     ws,
                     task_id,
@@ -865,6 +901,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
                     "ready",
                     "workspace has uncommitted changes; merge skipped — commit or stash them",
                 )?;
+                task_state::decrement_builder_attempts(ws, task_id, id)?;
                 reporter.status(
                     id,
                     "bounced",
