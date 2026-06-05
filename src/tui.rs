@@ -303,9 +303,9 @@ impl AppState {
         if self.cfg_edit.is_some() {
             match k.code {
                 KeyCode::Enter => {
-                    let value = self.cfg_edit.take().unwrap_or_default().trim().to_string();
                     let col = self.cfg_col;
                     let row = self.roles.get_mut(self.cfg_row)?;
+                    let value = self.cfg_edit.take().unwrap_or_default().trim().to_string();
                     if col == 1 {
                         row.model = value;
                     } else {
@@ -404,6 +404,7 @@ impl AppState {
         self.roles = roles;
         self.cfg_row = 0;
         self.cfg_col = 0;
+        self.cfg_edit = None;
     }
 
     pub fn in_model_config(&self) -> bool {

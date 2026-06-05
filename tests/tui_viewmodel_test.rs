@@ -356,3 +356,48 @@ fn clearing_a_model_commits_empty_meaning_tool_default() {
     );
     assert_eq!(s.model_rows()[0].model, "");
 }
+
+#[test]
+fn editing_effort_commits_on_enter_and_emits_set_role() {
+    let mut s = routed("");
+    s.on_key(ctrl('o'));
+    s.on_key(key(KeyCode::Right));
+    s.on_key(key(KeyCode::Right)); // effort column
+    assert!(s.on_key(key(KeyCode::Enter)).is_none(), "enter starts the edit");
+    assert_eq!(s.model_edit_buffer(), Some("high"));
+    for _ in 0..4 {
+        s.on_key(key(KeyCode::Backspace));
+    }
+    for c in "low".chars() {
+        s.on_key(key(KeyCode::Char(c)));
+    }
+    let cmd = s.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(
+            cmd,
+            Some(Command::SetRole { ref role, ref effort, .. })
+                if role == "architect" && effort == "low"
+        ),
+        "got {cmd:?}"
+    );
+    assert_eq!(s.model_rows()[0].effort, "low");
+}
+
+#[test]
+fn ctrl_o_from_job_detail_returns_to_job_detail() {
+    let mut s = routed("g");
+    s.on_key(key(KeyCode::Enter)); // commit goal -> List
+    s.apply(Event::JobDispatched {
+        id: "it-1".into(),
+        label: "scaffold".into(),
+        tool: "codex".into(),
+        model: String::new(),
+        log_path: None,
+    });
+    s.on_key(key(KeyCode::Enter)); // open the selected job -> JobDetail
+    assert!(s.in_job_detail());
+    s.on_key(ctrl('o'));
+    assert!(s.in_model_config());
+    s.on_key(key(KeyCode::Esc));
+    assert!(s.in_job_detail(), "esc returns to the job-detail view");
+}
