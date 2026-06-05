@@ -106,13 +106,20 @@ with an error instead of corrupting shared state.
   `resolver`. Tool permission switches are fixed by agentloop: `claude` always gets
   `--dangerously-skip-permissions`, and `codex` always gets `--yolo`.
 - **Gate and customer:** `.agentloop/verify.sh` still gates software behavior, so
-  agentloop can target any kind of software. After the gate passes for a business
-  task, the customer approves or rejects that task by its acceptance criteria.
+  agentloop can target any kind of software. The manager owns the script; its
+  contract is build + the project's test suite, nothing more. A business task's
+  acceptance run passes that task id as `$1` (so one task's flaky check can't
+  fail — and force a redesign of — an unrelated task); the per-iteration DONE
+  gate runs with no arguments. Scripts may ignore `$1` and always run everything.
+  After the scoped gate passes for a business task, the customer approves or
+  rejects that task by its acceptance criteria.
   The gate runs in its own process group with a wall-clock cap (default 30 min,
   override with `AGENTLOOP_GATE_TIMEOUT_SECS`) so a hung verify.sh can never
   hang the loop; a timeout reads as a gate failure (rc 124).
 - **Caps:** `max_iterations`, `max_parallel`, `item_timeout_sec`, `total_budget_sec`,
-  `max_attempts`. The loop also stops on a no-progress stall: two consecutive
+  `max_attempts`, and `max_redesigns` (whole-task re-plans; deliberately separate
+  from and higher than the per-builder attempt cap, so a handful of flaky gate
+  runs can't fail a task outright). The loop also stops on a no-progress stall: two consecutive
   iterations that merge nothing **and** change no loop-relevant state (gate verdict,
   backlog/builder statuses and attempts). Iterations where the manager re-scopes a
   failed task or a builder consumes an attempt count as progress — those are
