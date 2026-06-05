@@ -219,3 +219,19 @@ fn apply_role_updates_in_memory_routing_and_clears_empty_fields() {
     agentloop::config::apply_role(&mut cfg, "reviewer", "claude", "sonnet", "medium");
     assert_eq!(cfg.role_field("reviewer", "tool").as_deref(), Some("claude"));
 }
+
+#[test]
+fn update_role_file_leaves_no_temp_files_behind() {
+    let path = write_cfg("config.json", ROUTED_JSON);
+
+    agentloop::config::update_role_file(&path, "builder", "codex", "gpt-5.5", "high").unwrap();
+
+    let dir = path.parent().unwrap();
+    let leftovers: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+}

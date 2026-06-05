@@ -180,8 +180,17 @@ pub fn update_role_file(
             .with_context(|| format!("create config dir {}", parent.display()))?;
     }
     let pretty = serde_json::to_string_pretty(&root).context("serialize config")?;
-    std::fs::write(path, format!("{pretty}\n"))
-        .with_context(|| format!("write config {}", path.display()))?;
+    // Atomic replace (same pattern as state::write_atomic): a crash mid-write
+    // must never leave a truncated config.json behind.
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(format!(".config.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, format!("{pretty}\n"))
+        .with_context(|| format!("write config temp {}", tmp.display()))?;
+    if let Ok(f) = std::fs::File::open(&tmp) {
+        let _ = f.sync_all();
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("replace config {}", path.display()))?;
     Ok(())
 }
 
