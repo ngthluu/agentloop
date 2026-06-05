@@ -209,3 +209,57 @@ fn failed_dep_report_lists_open_items_behind_failed_items() {
     assert!(!report.contains("task-3"), "healthy items are not reported");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const BK_FAILED: &str = r#"{ "items": [
+  {"id":"it-1","status":"done","deps":[]},
+  {"id":"it-2","status":"failed","deps":[]},
+  {"id":"it-3","status":"ready","deps":[]},
+  {"id":"it-4","status":"failed","deps":[]}
+]}"#;
+
+#[test]
+fn failed_count_counts_only_failed_items() {
+    let p = tmp_backlog(BK_FAILED);
+    assert_eq!(state::failed_count(&p).unwrap(), 2);
+    let none = tmp_backlog(BK);
+    assert_eq!(state::failed_count(&none).unwrap(), 0);
+}
+
+#[test]
+fn progress_fingerprint_tracks_semantic_changes_only() {
+    let ws = tmp_ws(BK);
+    let bk = bk_path(&ws);
+    let tdir = ws.join(".agentloop/state/tasks/it-2");
+    std::fs::create_dir_all(&tdir).unwrap();
+    std::fs::write(
+        tdir.join("builders.json"),
+        r#"{"items":[{"id":"it-2-b1","status":"ready","attempts":0,"deps":[]}]}"#,
+    )
+    .unwrap();
+    let base = state::progress_fingerprint(&bk, &ws);
+
+    // Cosmetic backlog change (notes rewritten by the manager) is NOT progress.
+    state::set_status(&bk, "it-2", "ready", "rephrased note").unwrap();
+    assert_eq!(
+        state::progress_fingerprint(&bk, &ws),
+        base,
+        "notes-only changes must not count as progress"
+    );
+
+    // A backlog status transition IS progress.
+    state::set_status(&bk, "it-2", "in_progress", "").unwrap();
+    let after_status = state::progress_fingerprint(&bk, &ws);
+    assert_ne!(after_status, base, "status change counts as progress");
+
+    // A builder attempt/status change inside the task plan IS progress.
+    std::fs::write(
+        tdir.join("builders.json"),
+        r#"{"items":[{"id":"it-2-b1","status":"ready","attempts":1,"deps":[]}]}"#,
+    )
+    .unwrap();
+    assert_ne!(
+        state::progress_fingerprint(&bk, &ws),
+        after_status,
+        "builder attempts change counts as progress"
+    );
+}

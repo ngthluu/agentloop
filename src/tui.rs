@@ -34,6 +34,7 @@ pub struct AppState {
     pub gate: String,
     pub open: i64,
     pub standby: bool,
+    pub standby_reason: String,
     input: String,
     view: View,
     goal_focus_continue: bool,
@@ -51,6 +52,7 @@ impl AppState {
             gate: "init".into(),
             open: 0,
             standby: false,
+            standby_reason: String::new(),
             input: goal,
             view: View::GoalEntry,
             goal_focus_continue: false,
@@ -69,6 +71,7 @@ impl AppState {
                 model,
                 log_path,
             } => {
+                self.standby = false;
                 let now = std::time::Instant::now();
                 if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
                     j.label = label;
@@ -109,8 +112,9 @@ impl AppState {
                 self.gate = gate;
                 self.open = open;
             }
-            Event::EnteredStandby => {
+            Event::EnteredStandby { reason } => {
                 self.standby = true;
+                self.standby_reason = reason;
             }
             Event::Shutdown => {}
         }
@@ -393,7 +397,18 @@ pub fn render(f: &mut ratatui::Frame, s: &AppState) {
     // goal gets the remaining width and is ellipsized so a long goal can't push
     // the counters off-screen. Newlines would break the one-line bar.
     let total = fmt_elapsed(s.total_elapsed());
-    let prefix = if s.standby { " ✓ DONE · standby  │  " } else { " " };
+    // The standby banner carries the park reason: "✓ DONE" only when the run
+    // actually finished; otherwise the stop cause (stall/cap) with open/failed
+    // counts, so an idle loop with unfinished work is never mislabeled DONE.
+    let prefix = if s.standby {
+        if s.standby_reason.starts_with("all tasks done") {
+            " ✓ DONE · standby  │  ".to_string()
+        } else {
+            format!(" ⏸ standby: {}  │  ", s.standby_reason)
+        }
+    } else {
+        " ".to_string()
+    };
     let suffix = format!(
         "  │  iter {}  │  gate: {}  │  open: {}  │  ⏱ {}",
         s.iter, s.gate, s.open, total

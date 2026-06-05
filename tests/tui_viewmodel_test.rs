@@ -32,11 +32,33 @@ fn applies_events_to_view_model() {
 }
 
 #[test]
-fn standby_event_sets_flag() {
+fn standby_event_sets_flag_and_reason() {
     use agentloop::events::Event;
     let mut s = agentloop::tui::AppState::new("g".into());
-    s.apply(Event::EnteredStandby);
+    s.apply(Event::EnteredStandby {
+        reason: "no progress (stall) · 3 open / 1 failed".into(),
+    });
     assert!(s.standby);
+    assert_eq!(s.standby_reason, "no progress (stall) · 3 open / 1 failed");
+}
+
+#[test]
+fn standby_clears_when_the_loop_re_engages() {
+    use agentloop::events::Event;
+    let mut s = agentloop::tui::AppState::new("g".into());
+    s.apply(Event::EnteredStandby {
+        reason: "budget exhausted · 2 open / 0 failed".into(),
+    });
+    assert!(s.standby);
+    // A new dispatch means the loop is working again: the banner must drop.
+    s.apply(Event::JobDispatched {
+        id: "manager".into(),
+        label: "managing".into(),
+        tool: "claude".into(),
+        model: "sonnet".into(),
+        log_path: None,
+    });
+    assert!(!s.standby);
 }
 
 #[test]

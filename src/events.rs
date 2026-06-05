@@ -13,8 +13,9 @@ pub trait Reporter: Send + Sync {
     fn status(&self, id: &str, status: &str, tool: &str, model: &str, note: &str);
     /// End-of-iteration summary line.
     fn iteration(&self, n: u32, merged: u32, gate: &str, open: i64);
-    /// The loop entered the standby state (Phase 3). Default: no-op.
-    fn standby(&self) {}
+    /// The loop entered the standby state (Phase 3) for `reason`
+    /// (done / stall / cap — shown in the TUI status bar). Default: no-op.
+    fn standby(&self, _reason: &str) {}
 }
 
 pub struct EventLineReporter;
@@ -52,8 +53,8 @@ impl Reporter for EventLineReporter {
     fn iteration(&self, n: u32, merged: u32, gate: &str, open: i64) {
         eprintln!("iter {n}: merged={merged} gate={gate} open={open}");
     }
-    fn standby(&self) {
-        eprintln!("=== standby: waiting for input ===");
+    fn standby(&self, reason: &str) {
+        eprintln!("=== standby: {reason} — waiting for input ===");
     }
 }
 
@@ -77,7 +78,7 @@ pub enum Event {
         gate: String,
         open: i64,
     },
-    EnteredStandby,
+    EnteredStandby { reason: String },
     Shutdown,
 }
 
@@ -124,8 +125,10 @@ impl Reporter for ChannelReporter {
             open,
         });
     }
-    fn standby(&self) {
-        let _ = self.tx.send(Event::EnteredStandby);
+    fn standby(&self, reason: &str) {
+        let _ = self.tx.send(Event::EnteredStandby {
+            reason: reason.into(),
+        });
     }
 }
 
@@ -164,8 +167,8 @@ impl Reporter for RecordingReporter {
         );
         self.inner.iteration(n, merged, gate, open);
     }
-    fn standby(&self) {
+    fn standby(&self, reason: &str) {
         // Not recorded: standby is a UI session state, not a job lifecycle event.
-        self.inner.standby();
+        self.inner.standby(reason);
     }
 }

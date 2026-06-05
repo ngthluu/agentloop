@@ -81,6 +81,70 @@ pub fn open_count(path: &Path) -> Result<i64> {
     Ok(n as i64)
 }
 
+/// Number of `failed` items. Failed tasks are not dispatchable (so they are
+/// not "open"), but unresolved failures must keep the loop alive: the manager
+/// is required to reshape or drop them before the run can be DONE.
+pub fn failed_count(path: &Path) -> Result<i64> {
+    let v = read(path)?;
+    let empty = vec![];
+    let n = v["items"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|i| i["status"] == "failed")
+        .count();
+    Ok(n as i64)
+}
+
+/// Semantic fingerprint of loop-relevant state: every backlog item's
+/// (id, status, attempts, deps) plus every task-local builder's
+/// (id, status, attempts). Any change here is cap-bounded forward motion
+/// (attempt and redesign caps), so the stall detector treats an unchanged
+/// fingerprint across iterations as a dead loop. Notes/titles are excluded
+/// on purpose: agents rephrase them without making progress.
+pub fn progress_fingerprint(bk: &Path, ws: &Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let empty = vec![];
+    if let Ok(v) = read(bk) {
+        for it in v["items"].as_array().unwrap_or(&empty) {
+            let deps = it["deps"]
+                .as_array()
+                .map(|d| {
+                    d.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            parts.push(format!(
+                "{}={}:{}:{}",
+                it["id"], it["status"], it["attempts"], deps
+            ));
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(ws.join(".agentloop/state/tasks")) {
+        let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        dirs.sort();
+        for dir in dirs {
+            let Ok(text) = std::fs::read_to_string(dir.join("builders.json")) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                continue;
+            };
+            let task = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            for it in v["items"].as_array().unwrap_or(&empty) {
+                parts.push(format!(
+                    "{task}/{}={}:{}",
+                    it["id"], it["status"], it["attempts"]
+                ));
+            }
+        }
+    }
+    parts.sort();
+    parts.join("|")
+}
+
 pub fn set_status(path: &Path, id: &str, status: &str, note: &str) -> Result<()> {
     let mut v = read(path)?;
     if let Some(items) = v["items"].as_array_mut() {

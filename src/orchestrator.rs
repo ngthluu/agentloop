@@ -182,6 +182,71 @@ fn append_gate_log(ws: &Path, code: i32, output: &[u8]) {
     }
 }
 
+/// Run the gate with TUI/event visibility. Full verify.sh runs take minutes,
+/// and an unreported gate makes the loop look dead while it grinds — the job
+/// row is the only signal that the run is still working.
+fn gate_reported(ws: &Path, reporter: &Arc<dyn Reporter>, label: &str) -> i32 {
+    reporter.dispatch(
+        "gate",
+        label,
+        "",
+        "",
+        Some(&ws.join(".agentloop/state/last_gate.txt")),
+    );
+    let rc = gate(ws);
+    if rc == 0 {
+        reporter.status("gate", "done", "", "", "");
+    } else {
+        reporter.status(
+            "gate",
+            "failed",
+            "",
+            "",
+            &format!("verify.sh rc={rc} (see .agentloop/logs/gate.log)"),
+        );
+    }
+    rc
+}
+
+/// The run is DONE only when the gate passes and no open OR failed items
+/// remain. Failed items are not dispatchable, but declaring DONE over them
+/// would silently abandon work the manager is required to reshape or drop
+/// (manager prompt rule 8) — so they hold the loop open for another round.
+fn loop_done(gate_state: &str, open: i64, failed: i64) -> bool {
+    gate_state == "pass" && open == 0 && failed == 0
+}
+
+/// No-progress detector. An iteration makes progress when it merges work or
+/// changes any loop-relevant state (gate verdict, backlog/builder statuses or
+/// attempts — all cap-bounded, so they cannot count as progress forever).
+/// Two consecutive no-progress iterations (three identical in a row) = stalled.
+struct StallTracker {
+    stalls: u32,
+    prev_gate: String,
+    prev_fp: String,
+}
+
+impl StallTracker {
+    fn new() -> Self {
+        Self {
+            stalls: 0,
+            prev_gate: "init".into(),
+            prev_fp: "init".into(),
+        }
+    }
+    /// Record one iteration; returns true when the loop is stalled.
+    fn observe(&mut self, merged: u32, gate_state: &str, fp: &str) -> bool {
+        if merged == 0 && gate_state == self.prev_gate && fp == self.prev_fp {
+            self.stalls += 1;
+        } else {
+            self.stalls = 0;
+        }
+        self.prev_gate = gate_state.to_string();
+        self.prev_fp = fp.to_string();
+        self.stalls >= 2
+    }
+}
+
 fn builder_owner(ws: &Path, builder_id: &str) -> Result<Option<String>> {
     let tasks_dir = ws.join(".agentloop/state/tasks");
     let Ok(entries) = std::fs::read_dir(&tasks_dir) else {
@@ -657,7 +722,7 @@ pub async fn iterate(cfg: &Config, ws: &Path, n: u32, reporter: &Arc<dyn Reporte
         {
             continue;
         }
-        if gate(ws) != 0 {
+        if gate_reported(ws, reporter, &format!("verify gate · {task_id}")) != 0 {
             let feedback = gate_failure_feedback(ws);
             reopen_parent_for_redesign(&bk, ws, &task_id, &feedback, maxatt)?;
             continue;
@@ -693,8 +758,8 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
     let maxit = cfg.max_iterations();
     let budget = Duration::from_secs(cfg.total_budget_sec());
     let start = Instant::now();
-    let (mut n, mut stalls) = (0u32, 0u32);
-    let mut prev_gate = String::from("init");
+    let mut n = 0u32;
+    let mut stall = StallTracker::new();
 
     while n < maxit {
         n += 1;
@@ -706,26 +771,24 @@ pub async fn run(cfg: &Config, ws: &Path, reporter: Arc<dyn Reporter>) -> Result
         let merged = iterate(cfg, ws, n, &reporter).await?;
         let _ = reopen_unapproved_done_tasks(&bk, ws)?;
 
-        let grc = gate(ws);
+        let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}"));
         let gate_state = if grc == 0 { "pass" } else { "fail" };
         let open = state::open_count(&bk)?;
+        let failed = state::failed_count(&bk)?;
         reporter.iteration(n, merged, gate_state, open);
 
-        if gate_state == "pass" && open == 0 {
+        if loop_done(gate_state, open, failed) {
             eprintln!("DONE");
             return Ok(0);
         }
 
-        if merged == 0 && gate_state == prev_gate {
-            stalls += 1;
-            if stalls >= 2 {
-                eprintln!("STOP: no progress for 2 stalls (3 consecutive iterations)");
-                return Ok(1);
-            }
-        } else {
-            stalls = 0;
+        let fp = state::progress_fingerprint(&bk, ws);
+        if stall.observe(merged, gate_state, &fp) {
+            eprintln!(
+                "STOP: no progress for 2 stalls (3 consecutive iterations); {open} open / {failed} failed remain"
+            );
+            return Ok(1);
         }
-        prev_gate = gate_state.to_string();
     }
     eprintln!("STOP: max_iterations reached");
     Ok(1)
@@ -745,8 +808,7 @@ pub async fn run_interactive(
     let budget = Duration::from_secs(cfg.total_budget_sec());
 
     let mut n = 0u32;
-    let mut stalls = 0u32;
-    let mut prev_gate = String::from("init");
+    let mut stall = StallTracker::new();
     let mut window_start = Instant::now(); // budget window; reset on re-engage
     let mut iters_this_window = 0u32; // max_iterations is per-engagement
 
@@ -768,7 +830,9 @@ pub async fn run_interactive(
 
     'outer: loop {
         // --- WORKING phase ---
-        let go_standby = 'working: loop {
+        // Breaks with the human-readable reason the loop parked (shown in the
+        // TUI status bar so "why did it stop?" is answerable at a glance).
+        let standby_reason: String = 'working: loop {
             // Drain any queued commands without blocking (mid-run answers/add-task/quit).
             while let Ok(cmd) = crx.try_recv() {
                 match cmd {
@@ -780,56 +844,57 @@ pub async fn run_interactive(
                 }
             }
 
+            let open = state::open_count(&bk).unwrap_or(0);
+            let failed = state::failed_count(&bk).unwrap_or(0);
             if iters_this_window >= maxit {
                 eprintln!("STOP(window): max_iterations");
-                break 'working true;
+                break 'working format!(
+                    "max_iterations ({maxit}) · {open} open / {failed} failed"
+                );
             }
             if window_start.elapsed() >= budget {
                 eprintln!("STOP(window): budget");
-                break 'working true;
+                break 'working format!(
+                    "budget exhausted · {open} open / {failed} failed"
+                );
             }
 
             n += 1;
             iters_this_window += 1;
             let merged = iterate(cfg, ws, n, &reporter).await?;
             let _ = reopen_unapproved_done_tasks(&bk, ws)?;
-            let grc = gate(ws);
+            let grc = gate_reported(ws, &reporter, &format!("verify gate · iter {n}"));
             let gate_state = if grc == 0 { "pass" } else { "fail" };
             let open = state::open_count(&bk)?;
+            let failed = state::failed_count(&bk)?;
             reporter.iteration(n, merged, gate_state, open);
 
-            if gate_state == "pass" && open == 0 {
-                break 'working true;
+            if loop_done(gate_state, open, failed) {
+                break 'working "all tasks done · gate passing".into();
             }
 
-            if merged == 0 && gate_state == prev_gate {
-                stalls += 1;
-                if stalls >= 2 {
-                    eprintln!("STOP: no progress (stall)");
-                    break 'working true;
-                }
-            } else {
-                stalls = 0;
+            let fp = state::progress_fingerprint(&bk, ws);
+            if stall.observe(merged, gate_state, &fp) {
+                eprintln!("STOP: no progress (stall)");
+                break 'working format!(
+                    "no progress (stall) · {open} open / {failed} failed"
+                );
             }
-            prev_gate = gate_state.to_string();
         };
 
         // --- STANDBY phase ---
-        if go_standby {
-            reporter.standby();
-            match crx.recv().await {
-                None | Some(Command::Quit) => return Ok(0),
-                Some(Command::AddTask { request }) => {
-                    let _ = crate::requests::append(ws, &request);
-                }
-                Some(Command::StartRun { .. }) => {}
+        reporter.standby(&standby_reason);
+        match crx.recv().await {
+            None | Some(Command::Quit) => return Ok(0),
+            Some(Command::AddTask { request }) => {
+                let _ = crate::requests::append(ws, &request);
             }
-            // Re-engage: fresh budget window + iteration allowance, reset stall.
-            window_start = Instant::now();
-            iters_this_window = 0;
-            stalls = 0;
-            prev_gate = "init".into();
+            Some(Command::StartRun { .. }) => {}
         }
+        // Re-engage: fresh budget window + iteration allowance, reset stall.
+        window_start = Instant::now();
+        iters_this_window = 0;
+        stall = StallTracker::new();
         continue 'outer;
     }
 }
@@ -1049,5 +1114,44 @@ mod tests {
         let v = state::read(&bk).unwrap();
         assert_eq!(state::item(&v, "task-1").unwrap()["status"], "in_progress");
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn loop_done_requires_pass_and_no_open_and_no_failed() {
+        assert!(loop_done("pass", 0, 0));
+        assert!(!loop_done("fail", 0, 0));
+        assert!(!loop_done("pass", 1, 0));
+        assert!(
+            !loop_done("pass", 0, 2),
+            "failed tasks must keep the loop alive for a manager reshape round"
+        );
+    }
+
+    #[test]
+    fn stall_tracker_stalls_only_when_nothing_changes() {
+        let mut t = StallTracker::new();
+        // First iteration always counts as progress (init baselines).
+        assert!(!t.observe(0, "fail", "fp-a"));
+        // Two identical no-merge iterations in a row -> stalled.
+        assert!(!t.observe(0, "fail", "fp-a"));
+        assert!(t.observe(0, "fail", "fp-a"));
+    }
+
+    #[test]
+    fn stall_tracker_counts_state_changes_as_progress() {
+        let mut t = StallTracker::new();
+        assert!(!t.observe(0, "fail", "fp-a"));
+        assert!(!t.observe(0, "fail", "fp-a"));
+        // Backlog/builder state changed (e.g. manager re-scoped a failed task):
+        // progress even with zero merges.
+        assert!(!t.observe(0, "fail", "fp-b"));
+        assert!(!t.observe(0, "fail", "fp-b"));
+        // Gate verdict flip is progress too.
+        assert!(!t.observe(0, "pass", "fp-b"));
+        // A merge always resets the counter.
+        assert!(!t.observe(0, "pass", "fp-b"));
+        assert!(!t.observe(1, "pass", "fp-b"));
+        assert!(!t.observe(0, "pass", "fp-b"));
+        assert!(t.observe(0, "pass", "fp-b"));
     }
 }
