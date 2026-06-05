@@ -142,6 +142,8 @@ pub fn apply_role(cfg: &mut Config, role: &str, tool: &str, model: &str, effort:
 /// key (caps, defaults, unknown future fields). A missing file starts from the
 /// default config; an unparseable one is an error (never clobber a hand-edited
 /// file). Empty fields are omitted, so the tool's own default applies.
+/// Note: the role's existing object is replaced wholesale; unknown per-role
+/// keys in the existing file are not preserved.
 pub fn update_role_file(
     path: &Path,
     role: &str,
@@ -151,7 +153,8 @@ pub fn update_role_file(
 ) -> Result<()> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(_) => DEFAULT_CONFIG_JSON.to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DEFAULT_CONFIG_JSON.to_string(),
+        Err(e) => return Err(e).with_context(|| format!("read config {}", path.display())),
     };
     let mut root: serde_json::Value = serde_json::from_str(&text).context("parse config json")?;
     let obj = root
