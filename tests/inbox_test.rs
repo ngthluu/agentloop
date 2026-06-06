@@ -2,12 +2,19 @@ use agentloop::inbox;
 use std::path::PathBuf;
 
 fn tmp_ws() -> PathBuf {
+    // pid + counter: nanos alone collide when parallel tests start in the same
+    // tick (macOS quantizes SystemTime to 1µs); two tests sharing one workspace
+    // dir tread on each other's questions/answers.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let ws = std::env::temp_dir().join(format!(
-        "alinbox-{}",
+        "alinbox-{}-{}-{}",
+        std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(ws.join(".agentloop/questions")).unwrap();
     std::fs::create_dir_all(ws.join(".agentloop/answers")).unwrap();
